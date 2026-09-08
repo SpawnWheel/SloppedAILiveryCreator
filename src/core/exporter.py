@@ -28,6 +28,7 @@ class LiveryExporter:
         output_zip_path: Path,
         finish_type: str = "Matte",
         base_livery: str = "Default",
+        custom_preview_image: Optional[Image.Image] = None,
     ) -> Path:
         """
         Creates a distributable ZIP containing the body DDS, preview DDS, and override XML.
@@ -42,8 +43,11 @@ class LiveryExporter:
             processed_texture = ImageProcessor.apply_finish(texture_image, finish_type)
             processed_texture = ImageProcessor.resize_texture(processed_texture, 4096)
 
-            # 2. Process Preview Thumbnail
-            preview_thumb = ImageProcessor.generate_preview_thumbnail(texture_image)
+            # 2. Process Preview Thumbnail (custom or flatpack fallback)
+            if custom_preview_image is not None:
+                preview_thumb = ImageProcessor.generate_preview_thumbnail(custom_preview_image)
+            else:
+                preview_thumb = ImageProcessor.generate_preview_thumbnail(texture_image)
 
             # 3. Convert Livery to DDS (BC3 DXT5 with mipmaps)
             skin_dir = tmp_path / team_slug

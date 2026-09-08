@@ -135,9 +135,9 @@ class AIEngine:
             wf_copy = wireframe.copy()
             if wf_copy.mode != "RGB":
                 wf_copy = wf_copy.convert("RGB")
-            # Downscale wireframe to max 2048 for upload if larger, preserving clarity
-            if max(wf_copy.size) > 2048:
-                wf_copy.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+            # Preserve wireframe up to 4096 for 4K generation
+            if max(wf_copy.size) > 4096:
+                wf_copy.thumbnail((4096, 4096), Image.Resampling.LANCZOS)
             contents.append(wf_copy)
 
         # 2. Add Reference Images
@@ -298,3 +298,214 @@ class AIEngine:
             base = Image.blend(base, wf_resized, alpha=0.35)
 
         return base
+
+    @staticmethod
+    def build_refinement_system_instruction() -> str:
+        """System instruction for iterative livery texture refinement."""
+        return (
+            "You are an expert automotive texture artist and livery designer for racing simulators (Automobilista 2).\n"
+            "Your task is to refine, update, and modify an existing 2D livery texture map sheet based on user annotations and feedback notes.\n\n"
+            "CRITICAL MANDATORY REFINEMENT RULES:\n"
+            "1. IN-PLACE TEXTURE MODIFICATION: You are modifying the existing texture map sheet. Maintain overall design consistency, panel alignment, and colors where no changes were requested.\n"
+            "2. APPLY USER MARKUP & NOTES: Look closely at the annotated markup image where the user has hand-drawn arrows, circles, lines, or notes indicating changes. Apply the requested changes (e.g. adjust sponsor logos, recolor stripes, change numbers, tweak accents) exactly as instructed.\n"
+            "3. REMOVE MARKUP LINES: The output must be a clean, finished, professional 2D paint livery texture map sheet. Under NO circumstances should any sketch or annotation pen lines from the markup remain on the output texture.\n"
+            "4. STRICT FLAT 2D UV MAP: The output must be an orthographic flat 2D unwrapped texture map sheet (1:1 square aspect ratio). Zero 3D vehicle renders, zero wheels, zero perspective scenery.\n"
+            "5. VECTOR-CRISP GRAPHICS: Render sharp sponsor decals, racing numbers, and crisp racing stripes."
+        )
+
+    def refine_livery(
+        self,
+        current_livery: Image.Image,
+        annotated_livery: Optional[Image.Image] = None,
+        notes: str = "",
+        wireframe: Optional[Image.Image] = None,
+        references: Optional[List[Tuple[Image.Image, str]]] = None,
+        finish: str = "",
+        target_resolution: int = 4096,
+        model_name: Optional[str] = None,
+    ) -> Image.Image:
+        """
+        Refines an existing 2D livery texture map using Gemini multimodal generation
+        guided by user hand-drawn annotations and refinement notes.
+        Returns a 4K (4096 x 4096) RGBA PIL Image.
+        """
+        if not self.is_configured():
+            raise ValueError(
+                "Gemini API key is not configured. Please enter your Google AI Studio API key in Settings."
+            )
+
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=self._api_key)
+        model = model_name or config.get("ai_model", DEFAULT_AI_MODEL)
+        system_instruction = self.build_refinement_system_instruction()
+
+        # Build prompt & contents
+        contents = []
+        prompt_parts = [
+            "TASK: Refine and update the 2D unwrapped UV livery texture map based on user annotations and notes.",
+            "",
+            "--- INPUT ASSETS ---",
+        ]
+
+        # 1. Wireframe
+        if wireframe is not None:
+            wf_copy = wireframe.copy().convert("RGB")
+            if max(wf_copy.size) > 4096:
+                wf_copy.thumbnail((4096, 4096), Image.Resampling.LANCZOS)
+            contents.append(wf_copy)
+            prompt_parts.append(f"- Image {len(contents)}: 2D UV Wireframe Template (Structural UV layout).")
+
+        # 2. Current Livery (preserve full 4K resolution)
+        curr_copy = current_livery.copy().convert("RGB")
+        if max(curr_copy.size) > 4096:
+            curr_copy.thumbnail((4096, 4096), Image.Resampling.LANCZOS)
+        contents.append(curr_copy)
+        curr_idx = len(contents)
+        prompt_parts.append(f"- Image {curr_idx}: Current Livery Texture Sheet (Base design to be modified).")
+
+        # 3. Annotated Markup (preserve full 4K resolution)
+        if annotated_livery is not None:
+            annot_copy = annotated_livery.copy().convert("RGB")
+            if max(annot_copy.size) > 4096:
+                annot_copy.thumbnail((4096, 4096), Image.Resampling.LANCZOS)
+            contents.append(annot_copy)
+            annot_idx = len(contents)
+            prompt_parts.append(f"- Image {annot_idx}: Annotated Markup (User's hand-drawn notes, arrows, and circles showing exact changes).")
+
+        # 4. Supplementary references
+        if references:
+            for ref_img, role in references:
+                r_copy = ref_img.copy().convert("RGB")
+                if max(r_copy.size) > 2048:
+                    r_copy.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+                contents.append(r_copy)
+                prompt_parts.append(f"- Image {len(contents)}: Reference Image [{role}].")
+
+        prompt_parts.extend([
+            "",
+            "--- USER REFINEMENT INSTRUCTIONS ---",
+            notes.strip() if notes and notes.strip() else "Apply modifications as highlighted on the annotated markup image.",
+            "",
+            "--- FINAL EXECUTION INSTRUCTIONS ---",
+            f"1. Apply the user's requested changes directly to Image {curr_idx}.",
+            "2. Follow the visual guidance, arrows, and annotations from the markup image.",
+            "3. Remove all annotation/sketch lines from the output; the final output must be clean automotive paint and decals.",
+            "4. Keep all untouched panels and styling consistent with the current livery.",
+            "5. Output ONLY the flat 2D unwrapped texture map sheet (4K). Zero 3D car perspective.",
+        ])
+
+        full_prompt = "\n".join(prompt_parts)
+        contents.append(full_prompt)
+
+        models_to_try = [
+            model,
+            "gemini-3.1-flash-image",
+            "gemini-3-pro-image",
+            "gemini-2.5-flash-image",
+            FALLBACK_AI_MODEL,
+        ]
+        seen = set()
+        models_to_try = [m for m in models_to_try if not (m in seen or seen.add(m))]
+
+        last_error = None
+        for current_model in models_to_try:
+            try:
+                print(f"[AIEngine] Refining 4K livery with model: {current_model}...")
+
+                # Try 4K first, fallback to 2K/1:1 if model restricts 4K
+                gen_config = None
+                for size_opt in ["4K", "2K", None]:
+                    try:
+                        if size_opt:
+                            gen_config = types.GenerateContentConfig(
+                                response_modalities=["IMAGE"],
+                                system_instruction=system_instruction,
+                                image_config=types.ImageConfig(
+                                    aspect_ratio="1:1",
+                                    image_size=size_opt,
+                                ),
+                            )
+                        else:
+                            gen_config = types.GenerateContentConfig(
+                                response_modalities=["IMAGE"],
+                                system_instruction=system_instruction,
+                                image_config=types.ImageConfig(aspect_ratio="1:1"),
+                            )
+                        break
+                    except Exception:
+                        continue
+
+                response = client.models.generate_content(
+                    model=current_model,
+                    contents=contents,
+                    config=gen_config,
+                )
+
+                if response.candidates and response.candidates[0].content:
+                    for part in response.candidates[0].content.parts:
+                        try:
+                            img_obj = part.as_image()
+                            if hasattr(img_obj, "image_bytes") and img_obj.image_bytes:
+                                pil_img = Image.open(io.BytesIO(img_obj.image_bytes))
+                                print(f"[AIEngine] Successfully refined image ({pil_img.size}) from {current_model}")
+                                return self._finalize_image(pil_img, target_resolution)
+                            if isinstance(img_obj, Image.Image):
+                                return self._finalize_image(img_obj, target_resolution)
+                        except Exception:
+                            pass
+
+                        if hasattr(part, "inline_data") and part.inline_data and part.inline_data.data:
+                            try:
+                                pil_img = Image.open(io.BytesIO(part.inline_data.data))
+                                print(f"[AIEngine] Successfully refined inline image ({pil_img.size}) from {current_model}")
+                                return self._finalize_image(pil_img, target_resolution)
+                            except Exception:
+                                pass
+
+            except Exception as e:
+                print(f"[AIEngine] Model '{current_model}' refinement failed: {e}")
+                last_error = e
+                continue
+
+        raise RuntimeError(
+            f"Failed to refine livery with Gemini image models. Error: {last_error}"
+        )
+
+    @staticmethod
+    def refine_mock_livery(
+        current_livery: Image.Image,
+        annotated_livery: Optional[Image.Image] = None,
+        notes: str = "",
+        finish: str = "",
+        iteration: int = 2,
+        target_resolution: int = 4096,
+    ) -> Image.Image:
+        """
+        Generates a visually refined test livery pattern for offline testing.
+        """
+        refined = current_livery.copy().resize((target_resolution, target_resolution), Image.Resampling.LANCZOS).convert("RGBA")
+        draw = ImageDraw.Draw(refined)
+        w, h = refined.size
+
+        # Draw a dynamic revised accent banner
+        banner_h = h // 16
+        banner_y = (iteration * (h // 8)) % (h - banner_h)
+        accent_color = (0, 220, 130, 230) if iteration % 2 == 0 else (255, 140, 0, 230)
+
+        draw.rectangle(
+            [0, banner_y, w, banner_y + banner_h],
+            fill=accent_color,
+        )
+
+        # Draw revision label
+        label_text = f"REV {iteration}: {notes[:30]}" if notes else f"REVISION {iteration}"
+        center_x = w // 2
+        draw.text(
+            (center_x - 100, banner_y + banner_h // 4),
+            label_text,
+            fill=(255, 255, 255, 255),
+        )
+
+        return refined

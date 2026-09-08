@@ -34,6 +34,7 @@ from src.core.exporter import LiveryExporter
 from src.core.installer import LiveryInstaller
 from src.ui.actions_panel import ActionsPanel, BackupRestoreDialog
 from src.ui.deployment_panel import DeploymentPanel
+from src.ui.load_livery_dialog import LoadLiveryDialog
 from src.ui.preview_panel import PreviewPanel
 from src.ui.prompt_dialog import PromptEditorDialog
 from src.ui.reference_panel import ReferencePanel
@@ -179,6 +180,61 @@ class GenerationWorker(QThread):
             self.error.emit(str(e))
 
 
+class RefinementWorker(QThread):
+    """Background worker for iterative livery refinement with Gemini multimodal generation."""
+
+    finished = Signal(object)  # PIL.Image
+    error = Signal(str)
+
+    def __init__(
+        self,
+        ai_engine: AIEngine,
+        current_livery: Image.Image,
+        annotated_livery: Optional[Image.Image],
+        notes: str,
+        wireframe: Optional[Image.Image],
+        references: List[Tuple[Image.Image, str]],
+        finish: str,
+        iteration: int = 2,
+        target_resolution: int = 4096,
+    ):
+        super().__init__()
+        self.ai_engine = ai_engine
+        self.current_livery = current_livery
+        self.annotated_livery = annotated_livery
+        self.notes = notes
+        self.wireframe = wireframe
+        self.references = references
+        self.finish = finish
+        self.iteration = iteration
+        self.target_resolution = target_resolution
+
+    def run(self):
+        try:
+            if self.ai_engine.is_configured():
+                img = self.ai_engine.refine_livery(
+                    current_livery=self.current_livery,
+                    annotated_livery=self.annotated_livery,
+                    notes=self.notes,
+                    wireframe=self.wireframe,
+                    references=self.references,
+                    finish=self.finish,
+                    target_resolution=self.target_resolution,
+                )
+            else:
+                img = self.ai_engine.refine_mock_livery(
+                    current_livery=self.current_livery,
+                    annotated_livery=self.annotated_livery,
+                    notes=self.notes,
+                    finish=self.finish,
+                    iteration=self.iteration,
+                    target_resolution=self.target_resolution,
+                )
+            self.finished.emit(img)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class InstallWorker(QThread):
     """Background worker for livery processing, DDS compression, and AMS2 install."""
 
@@ -193,6 +249,7 @@ class InstallWorker(QThread):
         driver: str,
         texture_image: Image.Image,
         finish_type: str,
+        custom_preview_image: Optional[Image.Image] = None,
     ):
         super().__init__()
         self.car_folder = car_folder
@@ -201,6 +258,7 @@ class InstallWorker(QThread):
         self.driver = driver
         self.texture_image = texture_image
         self.finish_type = finish_type
+        self.custom_preview_image = custom_preview_image
 
     def run(self):
         try:
@@ -211,6 +269,7 @@ class InstallWorker(QThread):
                 driver=self.driver,
                 texture_image=self.texture_image,
                 finish_type=self.finish_type,
+                custom_preview_image=self.custom_preview_image,
             )
             self.success.emit(target_dir, backup)
         except Exception as e:
@@ -232,6 +291,7 @@ class ExportWorker(QThread):
         texture_image: Image.Image,
         output_zip_path: Path,
         finish_type: str,
+        custom_preview_image: Optional[Image.Image] = None,
     ):
         super().__init__()
         self.car_folder = car_folder
@@ -241,6 +301,7 @@ class ExportWorker(QThread):
         self.texture_image = texture_image
         self.output_zip_path = output_zip_path
         self.finish_type = finish_type
+        self.custom_preview_image = custom_preview_image
 
     def run(self):
         try:
@@ -252,6 +313,7 @@ class ExportWorker(QThread):
                 texture_image=self.texture_image,
                 output_zip_path=self.output_zip_path,
                 finish_type=self.finish_type,
+                custom_preview_image=self.custom_preview_image,
             )
             self.success.emit(out_path)
         except Exception as e:
@@ -274,6 +336,7 @@ class MainWindow(QMainWindow):
 
         self.ai_engine = AIEngine()
         self._gen_worker: Optional[GenerationWorker] = None
+        self._refine_worker: Optional[RefinementWorker] = None
         self._install_worker: Optional[InstallWorker] = None
         self._export_worker: Optional[ExportWorker] = None
 
@@ -286,6 +349,11 @@ class MainWindow(QMainWindow):
 
         # File Menu
         file_menu = menu_bar.addMenu("&File")
+
+        action_open_livery = QAction("&Open Existing Livery...", self)
+        action_open_livery.setToolTip("Load an existing livery from AMS2 Overrides or disk to edit and refine")
+        action_open_livery.triggered.connect(self._open_load_livery_dialog)
+        file_menu.addAction(action_open_livery)
 
         action_settings = QAction("&Settings / API Key...", self)
         action_settings.triggered.connect(self._open_settings)
@@ -353,7 +421,10 @@ class MainWindow(QMainWindow):
 
         self.preview_panel = PreviewPanel(self)
         self.preview_panel.generateRequested.connect(self._on_generate_livery)
-        self.preview_panel.rerollRequested.connect(self._on_generate_livery)
+        self.preview_panel.refineRequested.connect(self._on_refine_livery)
+        self.preview_panel.rerollRequested.connect(self._on_reroll_livery)
+        self.preview_panel.commitRequested.connect(self._on_commit_livery)
+        self.preview_panel.loadLiveryRequested.connect(self._open_load_livery_dialog)
         right_layout.addWidget(self.preview_panel, 1)
 
         self.actions_panel = ActionsPanel(self)
@@ -521,7 +592,7 @@ class MainWindow(QMainWindow):
 
     def _on_generation_finished(self, image: Image.Image):
         self._set_busy(False)
-        self.preview_panel.set_generated_image(image)
+        self.preview_panel.set_generated_image(image, is_refinement=False)
         self.status_bar.show_info("Livery generated successfully! (4096 × 4096 px)")
 
     def _on_generation_error(self, err_msg: str):
@@ -535,6 +606,141 @@ class MainWindow(QMainWindow):
         )
 
     # ==========================================================================
+    # Refinement & Multi-Turn Iteration Workflow
+    # ==========================================================================
+
+    def _on_refine_livery(self, notes: str):
+        curr_livery = self.preview_panel.get_generated_image()
+        if curr_livery is None:
+            QMessageBox.warning(
+                self, "No Livery Loaded", "Please generate or load a livery first before refining."
+            )
+            return
+
+        annotated_img = self.preview_panel.get_annotated_image()
+        wireframe = self.wireframe_panel.get_wireframe()
+        references = self.reference_panel.get_references()
+        finish = self.preview_panel.get_finish()
+
+        if not self.ai_engine.is_configured():
+            res = QMessageBox.question(
+                self,
+                "API Key Required",
+                "No Gemini API key is configured.\nWould you like to enter your Google AI Studio API key now?\n\n"
+                "(Click 'No' to run offline mock refinement for preview testing)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            )
+            if res == QMessageBox.StandardButton.Yes:
+                self._open_settings()
+                if not self.ai_engine.is_configured():
+                    return
+            elif res == QMessageBox.StandardButton.No:
+                # Mock refinement offline
+                self.status_bar.show_busy("Running offline refinement pattern...")
+                iteration = len(self.preview_panel.revisions) + 1
+                mock_refined = AIEngine.refine_mock_livery(
+                    current_livery=curr_livery,
+                    annotated_livery=annotated_img,
+                    notes=notes,
+                    finish=finish,
+                    iteration=iteration,
+                )
+                self._on_refinement_finished(mock_refined, notes)
+                return
+            else:
+                return
+
+        active_model = config.get("ai_model", DEFAULT_AI_MODEL)
+        self._set_busy(True, f"Refining Livery with {active_model}...")
+
+        iteration = len(self.preview_panel.revisions) + 1
+        self._refine_worker = RefinementWorker(
+            ai_engine=self.ai_engine,
+            current_livery=curr_livery,
+            annotated_livery=annotated_img,
+            notes=notes,
+            wireframe=wireframe,
+            references=references,
+            finish=finish,
+            iteration=iteration,
+            target_resolution=4096,
+        )
+        self._refine_worker.finished.connect(lambda img, n=notes: self._on_refinement_finished(img, n))
+        self._refine_worker.error.connect(self._on_refinement_error)
+        self._refine_worker.start()
+
+    def _on_refinement_finished(self, image: Image.Image, notes: str):
+        self._set_busy(False)
+        self.preview_panel.set_generated_image(image, is_refinement=True, notes=notes)
+        rev_count = len(self.preview_panel.revisions)
+        self.status_bar.show_info(f"Livery refined successfully! (Revision {rev_count})")
+
+    def _on_refinement_error(self, err_msg: str):
+        self._set_busy(False)
+        self.status_bar.show_error(err_msg)
+        QMessageBox.critical(
+            self,
+            "Refinement Failed",
+            f"Failed to refine livery texture from AI:\n\n{err_msg}\n\n"
+            "Tip: Ensure your API key is valid and has quota for Gemini image models.",
+        )
+
+    def _on_reroll_livery(self):
+        """Re-rolls either the current refinement iteration or the initial generation."""
+        if len(self.preview_panel.revisions) > 1 and self.preview_panel.current_rev_idx > 0:
+            notes = self.preview_panel.get_refinement_notes()
+            self._on_refine_livery(notes)
+        else:
+            self._on_generate_livery()
+
+    def _on_commit_livery(self):
+        curr_idx = self.preview_panel.current_rev_idx + 1
+        self.status_bar.show_info(f"✅ Livery version {curr_idx} committed! Ready to install or export.")
+        QMessageBox.information(
+            self,
+            "Livery Committed",
+            f"Livery Revision {curr_idx} has been committed as approved!\n\n"
+            "You can now install it to Automobilista 2 or export it as a shareable ZIP package.",
+        )
+
+    # ==========================================================================
+    # Existing Livery Editing Workflow
+    # ==========================================================================
+
+    def _open_load_livery_dialog(self):
+        current_car = self.deployment_panel.get_car_folder()
+        dialog = LoadLiveryDialog(initial_car=current_car, parent=self)
+        dialog.liverySelected.connect(self._on_existing_livery_loaded)
+        dialog.exec()
+
+    def _on_existing_livery_loaded(
+        self,
+        texture_img: Image.Image,
+        preview_img: Optional[Image.Image],
+        car_folder: str,
+        livery_id: int,
+        team_name: str,
+    ):
+        label = f"v1 (Loaded: {team_name[:18]})" if team_name else "v1 (Loaded)"
+        self.preview_panel.reset_revisions(texture_img, label=label)
+        if preview_img:
+            self.preview_panel.set_custom_preview_image(preview_img)
+
+        if car_folder:
+            if self.deployment_panel.combo_car.findText(car_folder) == -1:
+                self.deployment_panel.combo_car.addItem(car_folder)
+            self.deployment_panel.combo_car.setCurrentText(car_folder)
+
+        if livery_id:
+            self.deployment_panel.spin_id.setValue(livery_id)
+
+        if team_name:
+            self.deployment_panel.edit_team.setText(team_name)
+
+        self.deployment_panel.check_id_collision()
+        self.status_bar.show_info(f"Loaded existing livery '{team_name}' into editor")
+
+    # ==========================================================================
     # Installation Workflow
     # ==========================================================================
 
@@ -542,7 +748,7 @@ class MainWindow(QMainWindow):
         texture = self.preview_panel.get_generated_image()
         if texture is None:
             QMessageBox.warning(
-                self, "No Livery Available", "Please generate a livery first before installing."
+                self, "No Livery Available", "Please generate or load a livery first before installing."
             )
             return
 
@@ -551,6 +757,7 @@ class MainWindow(QMainWindow):
         team_name = self.deployment_panel.get_team_name()
         driver = self.deployment_panel.get_driver()
         finish = self.preview_panel.get_finish()
+        custom_preview = self.preview_panel.get_custom_preview_image()
 
         if not car_folder:
             QMessageBox.warning(self, "Invalid Car Folder", "Please select or enter a target car folder.")
@@ -565,6 +772,7 @@ class MainWindow(QMainWindow):
             driver=driver,
             texture_image=texture,
             finish_type=finish,
+            custom_preview_image=custom_preview,
         )
         self._install_worker.success.connect(self._on_install_success)
         self._install_worker.error.connect(self._on_install_error)
@@ -595,7 +803,7 @@ class MainWindow(QMainWindow):
         texture = self.preview_panel.get_generated_image()
         if texture is None:
             QMessageBox.warning(
-                self, "No Livery Available", "Please generate a livery first before exporting."
+                self, "No Livery Available", "Please generate or load a livery first before exporting."
             )
             return
 
@@ -604,6 +812,7 @@ class MainWindow(QMainWindow):
         team_name = self.deployment_panel.get_team_name()
         driver = self.deployment_panel.get_driver()
         finish = self.preview_panel.get_finish()
+        custom_preview = self.preview_panel.get_custom_preview_image()
 
         default_zip_name = f"{slugify(team_name)}_{car_folder}_{livery_id}_livery.zip"
         save_path, _ = QFileDialog.getSaveFileName(
@@ -622,6 +831,7 @@ class MainWindow(QMainWindow):
             texture_image=texture,
             output_zip_path=Path(save_path),
             finish_type=finish,
+            custom_preview_image=custom_preview,
         )
         self._export_worker.success.connect(self._on_export_success)
         self._export_worker.error.connect(self._on_export_error)

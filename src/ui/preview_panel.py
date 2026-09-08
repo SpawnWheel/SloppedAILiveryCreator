@@ -1,13 +1,17 @@
 """
-Panel for Section 3: 2D Generated Texture Viewport, Finish Selector, and Generation Controls.
+Panel for Section 3: Livery Viewport, Interactive Annotation Canvas,
+AI Refinement Loop, Version History, Finish Selector, and Custom Preview Thumbnail.
 """
 
-from typing import Optional
+from typing import List, Optional
 from PIL import Image
+
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QFrame,
     QGroupBox,
@@ -15,181 +19,90 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QSlider,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from src.ui.widgets.annotation_canvas import AnnotationCanvas, ToolType
+from src.ui.widgets.preview_thumbnail_box import PreviewThumbnailBox
 from src.utils.constants import DEFAULT_FINISH, FINISH_ALPHA_MAP
 
 
-class TextureViewport(QLabel):
-    """Interactive viewport displaying the generated 2D livery texture."""
+class LiveryRevision:
+    """Represents a single livery version in the multi-turn refinement history."""
 
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(320, 240)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setStyleSheet(
-            """
-            TextureViewport {
-                background-color: #121418;
-                border: 1px solid #2d313b;
-                border-radius: 8px;
-            }
-            """
-        )
-        self._current_pixmap: Optional[QPixmap] = None
-        self._base_image: Optional[Image.Image] = None
-        self._wireframe_image: Optional[Image.Image] = None
-        self._show_overlay: bool = False
-        self._placeholder_text = (
-            "2D Generated Texture Viewport\n\n"
-            "1. Load a Wireframe Template\n"
-            "2. Add Reference Images & Prompt\n"
-            "3. Click '⚡ Generate Livery'"
-        )
-
-    def set_texture(self, pil_image: Image.Image) -> None:
-        """Sets and renders the generated texture."""
-        self._base_image = pil_image
-        self._rebuild_pixmap()
-
-    def set_wireframe(self, wf: Optional[Image.Image]) -> None:
-        """Sets the spatial reference wireframe for overlay."""
-        self._wireframe_image = wf
-        if self._show_overlay:
-            self._rebuild_pixmap()
-
-    def set_show_wireframe(self, show: bool) -> None:
-        """Toggles the wireframe guide overlay on the generated texture."""
-        self._show_overlay = show
-        self._rebuild_pixmap()
-
-    def clear_texture(self) -> None:
-        self._base_image = None
-        self._current_pixmap = None
-        self.update()
-
-    def _rebuild_pixmap(self) -> None:
-        if self._base_image is None:
-            self._current_pixmap = None
-            self._update_display()
-            return
-
-        display_img = self._base_image
-        if self._show_overlay and self._wireframe_image is not None:
-            try:
-                base_rgb = self._base_image.convert("RGB")
-                wf_resized = self._wireframe_image.resize(base_rgb.size, Image.Resampling.LANCZOS).convert("RGB")
-                display_img = Image.blend(base_rgb, wf_resized, alpha=0.35).convert("RGBA")
-            except Exception:
-                display_img = self._base_image
-
-        rgb = display_img.convert("RGBA")
-        data = rgb.tobytes("raw", "RGBA")
-        qimg = QImage(data, rgb.width, rgb.height, QImage.Format.Format_RGBA8888)
-        self._current_pixmap = QPixmap.fromImage(qimg)
-        self._update_display()
-
-    def _update_display(self):
-        if self._current_pixmap:
-            scaled = self._current_pixmap.scaled(
-                self.size().width() - 16,
-                self.size().height() - 16,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self.setPixmap(scaled)
-        else:
-            self.clear()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_display()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if not self._current_pixmap:
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-            # Draw subtle grid
-            painter.setPen(QPen(QColor(35, 38, 46), 1, Qt.PenStyle.DotLine))
-            step = 30
-            for x in range(0, self.width(), step):
-                painter.drawLine(x, 0, x, self.height())
-            for y in range(0, self.height(), step):
-                painter.drawLine(0, y, self.width(), y)
-
-            # Draw text
-            painter.setPen(QColor(120, 128, 142))
-            font = painter.font()
-            font.setPointSize(11)
-            painter.setFont(font)
-            painter.drawText(
-                self.rect(),
-                Qt.AlignmentFlag.AlignCenter,
-                self._placeholder_text,
-            )
+    def __init__(self, image: Image.Image, notes: str = "", label: str = ""):
+        self.image = image
+        self.notes = notes
+        self.label = label
+        self.committed = False
 
 
 class PreviewPanel(QGroupBox):
-    """Panel displaying the 2D livery preview and AI generation controls."""
+    """
+    Panel displaying the 2D livery preview with interactive annotation tools,
+    multi-version revision tracking, AI refinement controls, and custom preview upload.
+    """
 
     generateRequested = Signal()
+    refineRequested = Signal(str)  # refinement_notes
     rerollRequested = Signal()
+    commitRequested = Signal()
     finishChanged = Signal(str)
+    loadLiveryRequested = Signal()
+    customPreviewChanged = Signal(object)  # Optional[Image.Image]
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__("3. PREVIEW & GENERATION", parent)
-        self.generated_image: Optional[Image.Image] = None
+        super().__init__("3. PREVIEW, ANNOTATION & REFINEMENT", parent)
+
+        self.revisions: List[LiveryRevision] = []
+        self.current_rev_idx: int = -1
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(8)
-        layout.setContentsMargins(10, 14, 10, 10)
+        layout.setSpacing(6)
+        layout.setContentsMargins(10, 10, 10, 10)
 
-        # 1. 2D Texture Viewport
-        self.viewport = TextureViewport(self)
-        layout.addWidget(self.viewport, 1)
+        # 1. Interactive Annotation Viewport Canvas
+        self.canvas = AnnotationCanvas(self)
 
-        # 2. Controls Row: Finish Selector + Resolution Indicator
-        controls_row = QHBoxLayout()
-        controls_row.setSpacing(8)
+        # 2. Top Drawing & Annotation Toolbar
+        toolbar = self._build_annotation_toolbar()
+        layout.addLayout(toolbar)
+        layout.addWidget(self.canvas, 1)
+
+        # 3. Viewport Controls Row: Finish + Resolution + Wireframe Overlay + Load Existing
+        vp_controls = QHBoxLayout()
+        vp_controls.setSpacing(8)
 
         finish_label = QLabel("Finish:")
         finish_label.setStyleSheet("color: #b0b0b0; font-size: 11px; font-weight: bold;")
-        controls_row.addWidget(finish_label)
+        vp_controls.addWidget(finish_label)
 
         self.combo_finish = QComboBox()
         for finish in FINISH_ALPHA_MAP.keys():
             self.combo_finish.addItem(finish)
         self.combo_finish.setCurrentText(DEFAULT_FINISH)
-        self.combo_finish.currentTextChanged.connect(self._on_finish_changed)
+        self.combo_finish.currentTextChanged.connect(self.finishChanged.emit)
         self.combo_finish.setStyleSheet(
             """
             QComboBox {
                 background-color: #1e2026;
                 border: 1px solid #3c404b;
                 border-radius: 4px;
-                padding: 4px 10px;
+                padding: 3px 8px;
                 color: #ffffff;
                 font-size: 11px;
-                min-width: 100px;
+                min-width: 90px;
             }
             """
         )
-        controls_row.addWidget(self.combo_finish)
+        vp_controls.addWidget(self.combo_finish)
 
-        controls_row.addSpacing(12)
-
-        res_label = QLabel("Resolution:")
-        res_label.setStyleSheet("color: #b0b0b0; font-size: 11px; font-weight: bold;")
-        controls_row.addWidget(res_label)
-
-        res_badge = QLabel("4096px (4K)")
+        res_badge = QLabel("4K (4096px)")
         res_badge.setStyleSheet(
             """
             QLabel {
@@ -197,62 +110,153 @@ class PreviewPanel(QGroupBox):
                 color: #64b5f6;
                 border: 1px solid #234b73;
                 border-radius: 4px;
-                padding: 3px 8px;
-                font-size: 11px;
+                padding: 3px 6px;
+                font-size: 10px;
                 font-weight: bold;
             }
             """
         )
-        controls_row.addWidget(res_badge)
-
-        controls_row.addSpacing(12)
+        vp_controls.addWidget(res_badge)
 
         self.check_overlay = QCheckBox("Overlay Wireframe")
         self.check_overlay.setToolTip("Overlay semi-transparent wireframe guide lines over the generated livery texture")
-        self.check_overlay.setStyleSheet(
+        self.check_overlay.setStyleSheet("color: #b0b8c6; font-size: 11px;")
+        self.check_overlay.toggled.connect(self.canvas.set_show_wireframe)
+        vp_controls.addWidget(self.check_overlay)
+
+        vp_controls.addStretch()
+
+        self.btn_load_existing = QPushButton("📂 Load Livery to Edit...")
+        self.btn_load_existing.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_load_existing.setToolTip("Load an existing livery from AMS2 Overrides or disk to edit and refine")
+        self.btn_load_existing.setStyleSheet(
             """
-            QCheckBox {
-                color: #b0b8c6;
+            QPushButton {
+                background-color: #2b3547;
+                border: 1px solid #3d5070;
+                border-radius: 4px;
+                color: #82b1ff;
+                padding: 4px 10px;
                 font-size: 11px;
                 font-weight: 500;
-                spacing: 5px;
             }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 1px solid #3c404b;
-                border-radius: 3px;
-                background-color: #1e2026;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #0078d4;
-                border-color: #0078d4;
+            QPushButton:hover {
+                background-color: #374763;
+                color: #ffffff;
             }
             """
         )
-        self.check_overlay.toggled.connect(self.viewport.set_show_wireframe)
-        controls_row.addWidget(self.check_overlay)
+        self.btn_load_existing.clicked.connect(self.loadLiveryRequested.emit)
+        vp_controls.addWidget(self.btn_load_existing)
 
-        controls_row.addStretch()
-        layout.addLayout(controls_row)
+        layout.addLayout(vp_controls)
 
-        # 3. Action Buttons Row: Generate Livery + Re-roll
+        # 4. In-Game UI Menu Preview Thumbnail Box (Custom upload / Flatpack)
+        self.preview_box = PreviewThumbnailBox(self)
+        self.preview_box.customPreviewChanged.connect(self.customPreviewChanged.emit)
+        layout.addWidget(self.preview_box)
+
+        # 5. Version History & Commit Bar
+        history_bar = QHBoxLayout()
+        history_bar.setSpacing(6)
+
+        self.btn_prev_rev = QPushButton("◀ Prev")
+        self.btn_prev_rev.setFixedWidth(55)
+        self.btn_prev_rev.setStyleSheet(self._btn_secondary_style())
+        self.btn_prev_rev.setEnabled(False)
+        self.btn_prev_rev.clicked.connect(self._prev_revision)
+        history_bar.addWidget(self.btn_prev_rev)
+
+        self.lbl_version = QLabel("No Livery Active")
+        self.lbl_version.setStyleSheet("color: #b0b0b0; font-size: 11px; font-weight: bold;")
+        history_bar.addWidget(self.lbl_version)
+
+        self.btn_next_rev = QPushButton("Next ▶")
+        self.btn_next_rev.setFixedWidth(55)
+        self.btn_next_rev.setStyleSheet(self._btn_secondary_style())
+        self.btn_next_rev.setEnabled(False)
+        self.btn_next_rev.clicked.connect(self._next_revision)
+        history_bar.addWidget(self.btn_next_rev)
+
+        self.lbl_commit_status = QLabel("Uncommitted")
+        self.lbl_commit_status.setStyleSheet(
+            "color: #ffb74d; background-color: #2d2417; border: 1px solid #5a401c; border-radius: 3px; padding: 2px 6px; font-size: 10px; font-weight: 500;"
+        )
+        self.lbl_commit_status.hide()
+        history_bar.addWidget(self.lbl_commit_status)
+
+        history_bar.addStretch()
+
+        self.btn_commit = QPushButton("✅ Commit Livery")
+        self.btn_commit.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_commit.setToolTip("Lock in this version as the approved livery for deployment")
+        self.btn_commit.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #2e7d32;
+                color: #ffffff;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #388e3c;
+            }
+            QPushButton:disabled {
+                background-color: #252830;
+                color: #555c68;
+            }
+            """
+        )
+        self.btn_commit.setEnabled(False)
+        self.btn_commit.clicked.connect(self._on_commit_clicked)
+        history_bar.addWidget(self.btn_commit)
+
+        layout.addLayout(history_bar)
+
+        # 6. Refinement Notes Input Box
+        self.notes_input = QTextEdit()
+        self.notes_input.setPlaceholderText(
+            "Refinement Notes for AI: Describe specific adjustments (e.g. 'Make the center stripe wider, "
+            "shift sponsor logo to front door as drawn in red, change numbers to #42, make roof carbon black...')"
+        )
+        self.notes_input.setFixedHeight(50)
+        self.notes_input.setStyleSheet(
+            """
+            QTextEdit {
+                background-color: #181a20;
+                border: 1px solid #3c404b;
+                border-radius: 4px;
+                padding: 4px 6px;
+                color: #ffffff;
+                font-size: 11px;
+            }
+            QTextEdit:focus {
+                border: 1px solid #0078d4;
+            }
+            """
+        )
+        layout.addWidget(self.notes_input)
+
+        # 7. Main Action Buttons Row: Generate, Refine, Re-roll
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        btn_row.setSpacing(6)
 
         self.btn_generate = QPushButton("⚡ Generate Livery")
-        self.btn_generate.setFixedHeight(38)
+        self.btn_generate.setFixedHeight(36)
         self.btn_generate.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_generate.setStyleSheet(
             """
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0078d4, stop:1 #0099ff);
                 color: #ffffff;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: bold;
                 border: none;
-                border-radius: 6px;
-                padding: 6px 16px;
+                border-radius: 5px;
+                padding: 5px 12px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1084e0, stop:1 #20a6ff);
@@ -266,57 +270,323 @@ class PreviewPanel(QGroupBox):
         self.btn_generate.clicked.connect(self.generateRequested.emit)
         btn_row.addWidget(self.btn_generate, 2)
 
-        self.btn_reroll = QPushButton("⟳ Re-roll")
-        self.btn_reroll.setFixedHeight(38)
-        self.btn_reroll.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_reroll.setStyleSheet(
+        self.btn_refine = QPushButton("🔄 Refine with AI")
+        self.btn_refine.setFixedHeight(36)
+        self.btn_refine.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refine.setToolTip("Send your drawings, notes, and current livery to AI for in-place modifications")
+        self.btn_refine.setStyleSheet(
             """
             QPushButton {
-                background-color: #2b303c;
+                background-color: #7b1fa2;
                 color: #ffffff;
-                font-size: 13px;
-                font-weight: 500;
-                border: 1px solid #3c404b;
-                border-radius: 6px;
-                padding: 6px 14px;
+                font-size: 12px;
+                font-weight: bold;
+                border: none;
+                border-radius: 5px;
+                padding: 5px 12px;
             }
             QPushButton:hover {
-                background-color: #3b4252;
-                border-color: #0078d4;
+                background-color: #8e24aa;
             }
             QPushButton:disabled {
                 background: #252830;
-                color: #5a5f6c;
-                border-color: #2d3038;
+                color: #555c68;
             }
             """
         )
+        self.btn_refine.setEnabled(False)
+        self.btn_refine.clicked.connect(self._on_refine_clicked)
+        btn_row.addWidget(self.btn_refine, 2)
+
+        self.btn_reroll = QPushButton("⟳ Re-roll")
+        self.btn_reroll.setFixedHeight(36)
+        self.btn_reroll.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reroll.setStyleSheet(self._btn_secondary_style())
         self.btn_reroll.clicked.connect(self.rerollRequested.emit)
         btn_row.addWidget(self.btn_reroll, 1)
 
         layout.addLayout(btn_row)
 
-    def _on_finish_changed(self, finish: str):
-        self.finishChanged.emit(finish)
+    # ==========================================================================
+    # Annotation Toolbar UI
+    # ==========================================================================
 
-    def set_wireframe(self, wireframe: Optional[Image.Image]):
-        """Sets the active wireframe template for optional overlay."""
-        self.viewport.set_wireframe(wireframe)
+    def _build_annotation_toolbar(self) -> QHBoxLayout:
+        bar = QHBoxLayout()
+        bar.setSpacing(4)
+        bar.setContentsMargins(0, 0, 0, 2)
 
-    def set_generated_image(self, image: Image.Image):
-        self.generated_image = image
-        self.viewport.set_texture(image)
+        lbl_tools = QLabel("Markup Tools:")
+        lbl_tools.setStyleSheet("color: #8c96a5; font-size: 10px; font-weight: bold;")
+        bar.addWidget(lbl_tools)
+
+        self.tool_group = QButtonGroup(self)
+
+        tools = [
+            ("🖌️ Pen", ToolType.PEN, "Draw freehand annotations"),
+            ("➡️ Arrow", ToolType.ARROW, "Draw directional arrow pointing to panels"),
+            ("🔲 Box", ToolType.RECT, "Draw rectangular highlight box"),
+            ("🔤 Text", ToolType.TEXT, "Place text callout note on texture"),
+            ("🧹 Eraser", ToolType.ERASER, "Erase annotations"),
+        ]
+
+        for label, tool_type, tip in tools:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.setStyleSheet(self._tool_btn_style())
+            if tool_type == ToolType.PEN:
+                btn.setChecked(True)
+            btn.clicked.connect(lambda _, t=tool_type: self.canvas.set_tool(t))
+            self.tool_group.addButton(btn)
+            bar.addWidget(btn)
+
+        bar.addSpacing(6)
+
+        # Color presets
+        colors = [
+            ("#FF3B30", "Red"),
+            ("#FFCC00", "Yellow"),
+            ("#34C759", "Neon Green"),
+            ("#007AFF", "Electric Blue"),
+            ("#FFFFFF", "White"),
+            ("#000000", "Black"),
+        ]
+        for hex_code, name in colors:
+            c_btn = QPushButton()
+            c_btn.setFixedSize(18, 18)
+            c_btn.setToolTip(f"Markup Color: {name}")
+            c_btn.setStyleSheet(
+                f"background-color: {hex_code}; border: 1px solid #555; border-radius: 9px;"
+            )
+            c_btn.clicked.connect(lambda _, h=hex_code: self.canvas.set_color(QColor(h)))
+            bar.addWidget(c_btn)
+
+        btn_more_colors = QPushButton("🎨")
+        btn_more_colors.setFixedSize(20, 20)
+        btn_more_colors.setToolTip("Pick custom color...")
+        btn_more_colors.setStyleSheet("background-color: #2b303c; border: 1px solid #3c404b; border-radius: 4px;")
+        btn_more_colors.clicked.connect(self._pick_custom_color)
+        bar.addWidget(btn_more_colors)
+
+        bar.addSpacing(6)
+
+        # Brush size buttons
+        for label, size in [("S", 8), ("M", 16), ("L", 32)]:
+            s_btn = QPushButton(label)
+            s_btn.setFixedSize(20, 20)
+            s_btn.setStyleSheet("background-color: #232730; color: #bbb; border: 1px solid #3c404b; border-radius: 3px; font-size: 9px;")
+            s_btn.clicked.connect(lambda _, s=size: self.canvas.set_brush_size(s))
+            bar.addWidget(s_btn)
+
+        bar.addSpacing(6)
+
+        # Undo & Clear
+        btn_undo = QPushButton("↩️ Undo")
+        btn_undo.setStyleSheet(self._btn_secondary_style(padding="2px 6px"))
+        btn_undo.clicked.connect(self.canvas.undo)
+        bar.addWidget(btn_undo)
+
+        btn_clear = QPushButton("🗑️ Clear")
+        btn_clear.setStyleSheet(self._btn_secondary_style(padding="2px 6px"))
+        btn_clear.clicked.connect(self.canvas.clear_annotations)
+        bar.addWidget(btn_clear)
+
+        check_show_annot = QCheckBox("Show")
+        check_show_annot.setChecked(True)
+        check_show_annot.setToolTip("Show/hide annotations overlay")
+        check_show_annot.setStyleSheet("color: #8c96a5; font-size: 10px;")
+        check_show_annot.toggled.connect(self.canvas.set_show_annotations)
+        bar.addWidget(check_show_annot)
+
+        bar.addStretch()
+        return bar
+
+    def _pick_custom_color(self):
+        col = QColorDialog.getColor(self.canvas.pen_color, self, "Pick Annotation Color")
+        if col.isValid():
+            self.canvas.set_color(col)
+
+    # ==========================================================================
+    # Revision & Iteration Management
+    # ==========================================================================
+
+    def reset_revisions(self, initial_image: Image.Image, label: str = "v1 (Initial)"):
+        """Resets the revision stack with a new initial base livery."""
+        self.revisions = [LiveryRevision(initial_image, label=label)]
+        self.current_rev_idx = 0
+        self.canvas.clear_annotations()
+        self._update_revision_ui()
+
+    def add_revision(self, new_image: Image.Image, notes: str = "", label: str = ""):
+        """Adds a newly refined livery version to the history stack."""
+        rev_num = len(self.revisions) + 1
+        rev_label = label or f"v{rev_num}"
+        rev = LiveryRevision(new_image, notes=notes, label=rev_label)
+        self.revisions.append(rev)
+        self.current_rev_idx = len(self.revisions) - 1
+        self.canvas.clear_annotations()
+        self._update_revision_ui()
+
+    def _prev_revision(self):
+        if self.current_rev_idx > 0:
+            self.current_rev_idx -= 1
+            self._update_revision_ui()
+
+    def _next_revision(self):
+        if self.current_rev_idx < len(self.revisions) - 1:
+            self.current_rev_idx += 1
+            self._update_revision_ui()
+
+    def _on_commit_clicked(self):
+        if 0 <= self.current_rev_idx < len(self.revisions):
+            self.revisions[self.current_rev_idx].committed = True
+            self._update_revision_ui()
+            self.commitRequested.emit()
+
+    def _update_revision_ui(self):
+        if not self.revisions or self.current_rev_idx < 0:
+            self.lbl_version.setText("No Livery Active")
+            self.btn_prev_rev.setEnabled(False)
+            self.btn_next_rev.setEnabled(False)
+            self.btn_commit.setEnabled(False)
+            self.btn_refine.setEnabled(False)
+            self.lbl_commit_status.hide()
+            self.canvas.set_texture(None)
+            self.preview_box.set_auto_texture(None)
+            return
+
+        rev = self.revisions[self.current_rev_idx]
+        total = len(self.revisions)
+        curr = self.current_rev_idx + 1
+
+        self.lbl_version.setText(f"{rev.label} ({curr}/{total})")
+        self.btn_prev_rev.setEnabled(self.current_rev_idx > 0)
+        self.btn_next_rev.setEnabled(self.current_rev_idx < total - 1)
+        self.btn_commit.setEnabled(True)
+        self.btn_refine.setEnabled(True)
+
+        # Update status badge
+        self.lbl_commit_status.show()
+        if rev.committed:
+            self.lbl_commit_status.setText(f"✅ Committed ({rev.label})")
+            self.lbl_commit_status.setStyleSheet(
+                "color: #81c784; background-color: #172d1a; border: 1px solid #28542c; border-radius: 3px; padding: 2px 6px; font-size: 10px; font-weight: bold;"
+            )
+        else:
+            self.lbl_commit_status.setText(f"Draft ({rev.label})")
+            self.lbl_commit_status.setStyleSheet(
+                "color: #ffb74d; background-color: #2d2417; border: 1px solid #5a401c; border-radius: 3px; padding: 2px 6px; font-size: 10px; font-weight: 500;"
+            )
+
+        # Update viewport & preview
+        self.canvas.set_texture(rev.image)
+        self.preview_box.set_auto_texture(rev.image)
+
+    def _on_refine_clicked(self):
+        notes = self.notes_input.toPlainText().strip()
+        self.refineRequested.emit(notes)
+
+    # ==========================================================================
+    # Public Getters & Setters
+    # ==========================================================================
+
+    def set_wireframe(self, wf: Optional[Image.Image]):
+        self.canvas.set_wireframe(wf)
+
+    def set_generated_image(self, image: Image.Image, is_refinement: bool = False, notes: str = ""):
+        """Called when AI generation completes."""
+        if is_refinement and self.revisions:
+            self.add_revision(image, notes=notes)
+        else:
+            self.reset_revisions(image, label="v1 (Initial)")
 
     def get_generated_image(self) -> Optional[Image.Image]:
-        return self.generated_image
+        """Returns current active revision's clean texture image."""
+        if 0 <= self.current_rev_idx < len(self.revisions):
+            return self.revisions[self.current_rev_idx].image
+        return self.canvas.get_base_image()
+
+    def get_annotated_image(self) -> Optional[Image.Image]:
+        """Returns base texture composited with user's drawings."""
+        return self.canvas.get_annotated_image()
+
+    def get_refinement_notes(self) -> str:
+        return self.notes_input.toPlainText().strip()
+
+    def clear_refinement_notes(self) -> None:
+        self.notes_input.clear()
+
+    def get_custom_preview_image(self) -> Optional[Image.Image]:
+        return self.preview_box.get_custom_preview()
+
+    def set_custom_preview_image(self, img: Optional[Image.Image]) -> None:
+        self.preview_box.set_custom_preview(img)
 
     def get_finish(self) -> str:
         return self.combo_finish.currentText()
 
-    def set_busy(self, is_busy: bool):
+    def set_busy(self, is_busy: bool, message: str = ""):
         self.btn_generate.setEnabled(not is_busy)
+        self.btn_refine.setEnabled(not is_busy and len(self.revisions) > 0)
         self.btn_reroll.setEnabled(not is_busy)
+        self.btn_commit.setEnabled(not is_busy and len(self.revisions) > 0)
+        self.btn_load_existing.setEnabled(not is_busy)
+
         if is_busy:
-            self.btn_generate.setText("⚡ Generating...")
+            if "Refin" in message:
+                self.btn_refine.setText("🔄 Refining...")
+            else:
+                self.btn_generate.setText("⚡ Generating...")
         else:
             self.btn_generate.setText("⚡ Generate Livery")
+            self.btn_refine.setText("🔄 Refine with AI")
+
+    # ==========================================================================
+    # Styles
+    # ==========================================================================
+
+    @staticmethod
+    def _tool_btn_style() -> str:
+        return """
+            QPushButton {
+                background-color: #1e2026;
+                color: #d0d4dc;
+                border: 1px solid #3c404b;
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background-color: #2b303c;
+                border-color: #0078d4;
+            }
+            QPushButton:checked {
+                background-color: #0078d4;
+                color: #ffffff;
+                font-weight: bold;
+                border-color: #0099ff;
+            }
+        """
+
+    @staticmethod
+    def _btn_secondary_style(padding: str = "4px 8px") -> str:
+        return f"""
+            QPushButton {{
+                background-color: #2b303c;
+                color: #ffffff;
+                border: 1px solid #3c404b;
+                border-radius: 4px;
+                padding: {padding};
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: #3b4252;
+                border-color: #0078d4;
+            }}
+            QPushButton:disabled {{
+                background-color: #1a1c22;
+                color: #4a505c;
+                border-color: #232730;
+            }}
+        """

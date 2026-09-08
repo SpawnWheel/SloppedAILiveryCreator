@@ -136,3 +136,60 @@ class DDSConverter:
                 )
 
             return expected_dds
+
+    @staticmethod
+    def load_dds_image(dds_path: Path) -> Image.Image:
+        """
+        Loads a DDS texture file and returns an RGBA PIL Image.
+        Tries PIL Image.open first, falling back to texconv decompression.
+        """
+        dds_path = Path(dds_path)
+        if not dds_path.exists():
+            raise FileNotFoundError(f"DDS file does not exist: {dds_path}")
+
+        # 1. Try direct PIL loading
+        try:
+            with Image.open(dds_path) as pil_img:
+                return pil_img.convert("RGBA").copy()
+        except Exception as pil_err:
+            print(f"[DDSConverter] PIL failed to open {dds_path.name} ({pil_err}), using texconv...")
+
+        # 2. Fallback to texconv conversion to PNG
+        texconv = DDSConverter.get_texconv_path()
+        with tempfile.TemporaryDirectory(prefix="dds_read_") as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            cmd = [
+                str(texconv),
+                "-ft",
+                "png",
+                "-y",
+                "-o",
+                str(tmp_path),
+                str(dds_path),
+            ]
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"texconv failed to decompress DDS '{dds_path}':\n{process.stderr}\n{process.stdout}"
+                )
+
+            stem = dds_path.stem
+            expected_png = tmp_path / f"{stem}.png"
+            if not expected_png.exists():
+                expected_png = tmp_path / f"{stem}.PNG"
+            if not expected_png.exists():
+                # Search any png produced in the directory
+                found = list(tmp_path.glob("*.png")) + list(tmp_path.glob("*.PNG"))
+                if found:
+                    expected_png = found[0]
+
+            if not expected_png.exists():
+                raise FileNotFoundError(f"Failed to find decompressed PNG for {dds_path}")
+
+            with Image.open(expected_png) as img:
+                return img.convert("RGBA").copy()
