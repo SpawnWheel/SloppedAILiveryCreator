@@ -47,6 +47,7 @@ REFERENCE_ROLES = [
 # Supported Input File Extensions
 SUPPORTED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".psd", ".webp"}
 SUPPORTED_ARCHIVE_EXTS = {".zip"}
+SUPPORTED_LIVERY_INSTALL_EXTS = {".dds", ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".webp"}
 
 # External Tools
 TEXCONV_DOWNLOAD_URL = (

@@ -205,7 +205,10 @@ class LiveryInstaller:
         target_skin_dir.mkdir(parents=True, exist_ok=True)
 
         # 1. Process 4K Livery Texture & Inject Alpha
-        processed_texture = ImageProcessor.apply_finish(texture_image, finish_type)
+        if finish_type == "__preserve__":
+            processed_texture = texture_image.convert("RGBA") if texture_image.mode != "RGBA" else texture_image
+        else:
+            processed_texture = ImageProcessor.apply_finish(texture_image, finish_type)
         processed_texture = ImageProcessor.resize_texture(processed_texture, 4096)
 
         # 2. Process Preview Thumbnail (custom or flatpack fallback)
@@ -250,3 +253,48 @@ class LiveryInstaller:
         )
 
         return target_skin_dir, backup_path
+
+    @staticmethod
+    def install_livery_from_file(
+        file_path: Path,
+        car_folder_name: str,
+        livery_id: int,
+        team_name: str,
+        driver: str,
+        finish_type: str = "Matte",
+        base_livery: str = "Default",
+        custom_preview_image: Optional[Image.Image] = None,
+    ) -> Tuple[Path, Optional[Path]]:
+        """
+        Installs a pre-made livery file (DDS, PNG, JPG, TGA, BMP, etc.) directly without AI:
+        - If DDS: loads via DDSConverter.load_dds_image and preserves the original alpha channel
+        - If other image format: loads via PIL and applies selected finish_type
+        - Generates preview thumbnail (custom or auto-generated)
+        - Converts to DDS and surgically updates the car XML override
+
+        Returns: (installed_dir_path, backup_path_or_none)
+        """
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Livery file not found: {file_path}")
+
+        ext = file_path.suffix.lower()
+        if ext == ".dds":
+            texture_img = DDSConverter.load_dds_image(file_path)
+            effective_finish = "__preserve__"
+        else:
+            with Image.open(file_path) as img:
+                texture_img = img.convert("RGBA").copy()
+            effective_finish = finish_type
+
+        return LiveryInstaller.install_livery(
+            car_folder_name=car_folder_name,
+            livery_id=livery_id,
+            team_name=team_name,
+            driver=driver,
+            texture_image=texture_img,
+            finish_type=effective_finish,
+            base_livery=base_livery,
+            custom_preview_image=custom_preview_image,
+        )
+

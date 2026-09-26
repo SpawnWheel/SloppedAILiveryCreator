@@ -23,6 +23,7 @@ from src.core.exporter import LiveryExporter
 from src.core.image_processor import ImageProcessor
 from src.core.installer import LiveryInstaller
 from src.core.xml_manager import XMLManager
+from src.ui.actions_panel import ActionsPanel
 from src.ui.preview_panel import PreviewPanel
 from src.ui.widgets.annotation_canvas import AnnotationCanvas, ToolType
 from src.ui.widgets.preview_thumbnail_box import PreviewThumbnailBox
@@ -156,8 +157,83 @@ class TestRefinementCore(unittest.TestCase):
             self.assertTrue(any("body.dds" in n for n in names))
             self.assertTrue(any("bmw_m4_gt3.xml" in n for n in names))
 
+    def test_quick_install_png_file(self):
+        """Tests LiveryInstaller.install_livery_from_file with a PNG file and finish applied."""
+        png_path = self.temp_dir / "sample_skin.png"
+        sample_img = Image.new("RGBA", (512, 512), (180, 40, 40, 255))
+        sample_img.save(png_path)
+
+        target_dir, backup = LiveryInstaller.install_livery_from_file(
+            file_path=png_path,
+            car_folder_name="bmw_m4_gt3",
+            livery_id=33,
+            team_name="Speed Motorsport",
+            driver="J. Button",
+            finish_type="Matte",
+        )
+
+        self.assertTrue(target_dir.exists())
+        self.assertTrue((target_dir / "body.dds").exists())
+        self.assertTrue((target_dir / "preview.dds").exists())
+
+        # Check XML entry
+        xml_path = self.temp_dir / "bmw_m4_gt3" / "bmw_m4_gt3.xml"
+        col = XMLManager.check_collision(xml_path, 33)
+        self.assertIsNotNone(col)
+        self.assertIn("Speed Motorsport", col["name"])
+
+    def test_quick_install_dds_file_preserves_alpha(self):
+        """Tests LiveryInstaller.install_livery_from_file preserves original alpha on DDS files."""
+        # Create an image with distinctive alpha (e.g. 170 / Satin)
+        original_img = Image.new("RGBA", (256, 256), (30, 90, 150, 170))
+        source_dds = DDSConverter.convert_image_to_dds(
+            image=original_img,
+            output_dir=self.temp_dir,
+            base_filename="external_custom_livery",
+            format_type="BC3_UNORM",
+            generate_mipmaps=True,
+        )
+        self.assertTrue(source_dds.exists())
+
+        # Install with finish_type="Matte" (alpha 80) — should be ignored for DDS to preserve 170
+        target_dir, _ = LiveryInstaller.install_livery_from_file(
+            file_path=source_dds,
+            car_folder_name="mercedes_amg_gt3_evo",
+            livery_id=88,
+            team_name="Silver Arrow",
+            driver="L. Hamilton",
+            finish_type="Matte",
+        )
+
+        installed_body = target_dir / "body.dds"
+        self.assertTrue(installed_body.exists())
+
+        # Decompress installed DDS and verify alpha is preserved (~170, not 80)
+        loaded = DDSConverter.load_dds_image(installed_body)
+        _, _, _, a = loaded.split()
+        alpha_sample = a.getpixel((64, 64))
+        self.assertAlmostEqual(alpha_sample, 170, delta=5)
+
+    def test_quick_install_with_custom_preview(self):
+        """Tests LiveryInstaller.install_livery_from_file with custom preview image."""
+        png_path = self.temp_dir / "car_livery.png"
+        Image.new("RGB", (256, 256), (50, 100, 150)).save(png_path)
+        custom_prev = Image.new("RGB", (300, 100), (255, 128, 0))
+
+        target_dir, _ = LiveryInstaller.install_livery_from_file(
+            file_path=png_path,
+            car_folder_name="bmw_m4_gt3",
+            livery_id=44,
+            team_name="Custom Preview Racing",
+            driver="M. Verstappen",
+            finish_type="Gloss",
+            custom_preview_image=custom_prev,
+        )
+        self.assertTrue((target_dir / "preview.dds").exists())
+
 
 class TestUIWidgets(unittest.TestCase):
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication(sys.argv)
@@ -238,6 +314,24 @@ class TestUIWidgets(unittest.TestCase):
         panel._on_commit_clicked()
         self.assertTrue(panel.revisions[1].committed)
 
+    def test_actions_panel_quick_install(self):
+        """Tests ActionsPanel quick install button and signal."""
+        panel = ActionsPanel()
+        self.assertTrue(hasattr(panel, "btn_quick_install"))
+
+        # Test signal emission
+        emitted = []
+        panel.quickInstallRequested.connect(lambda: emitted.append(True))
+        panel.btn_quick_install.click()
+        self.assertEqual(len(emitted), 1)
+
+        # Test busy state
+        panel.set_busy(True)
+        self.assertFalse(panel.btn_quick_install.isEnabled())
+        panel.set_busy(False)
+        self.assertTrue(panel.btn_quick_install.isEnabled())
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -46,6 +46,7 @@ from src.utils.constants import (
     AVAILABLE_AI_MODELS,
     DEFAULT_AI_MODEL,
     FALLBACK_AI_MODEL,
+    SUPPORTED_LIVERY_INSTALL_EXTS,
 )
 from src.utils.file_helpers import cleanup_dir, get_cache_dir, slugify
 
@@ -320,6 +321,47 @@ class ExportWorker(QThread):
             self.error.emit(str(e))
 
 
+class QuickInstallWorker(QThread):
+    """Background worker for installing pre-made livery files directly without AI."""
+
+    success = Signal(object, object)  # (Path, Optional[Path])
+    error = Signal(str)
+
+    def __init__(
+        self,
+        file_path: Path,
+        car_folder: str,
+        livery_id: int,
+        team_name: str,
+        driver: str,
+        finish_type: str,
+        custom_preview_image: Optional[Image.Image] = None,
+    ):
+        super().__init__()
+        self.file_path = file_path
+        self.car_folder = car_folder
+        self.livery_id = livery_id
+        self.team_name = team_name
+        self.driver = driver
+        self.finish_type = finish_type
+        self.custom_preview_image = custom_preview_image
+
+    def run(self):
+        try:
+            target_dir, backup = LiveryInstaller.install_livery_from_file(
+                file_path=self.file_path,
+                car_folder_name=self.car_folder,
+                livery_id=self.livery_id,
+                team_name=self.team_name,
+                driver=self.driver,
+                finish_type=self.finish_type,
+                custom_preview_image=self.custom_preview_image,
+            )
+            self.success.emit(target_dir, backup)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 # ==============================================================================
 # Main Window Class
 # ==============================================================================
@@ -338,6 +380,7 @@ class MainWindow(QMainWindow):
         self._gen_worker: Optional[GenerationWorker] = None
         self._refine_worker: Optional[RefinementWorker] = None
         self._install_worker: Optional[InstallWorker] = None
+        self._quick_install_worker: Optional[QuickInstallWorker] = None
         self._export_worker: Optional[ExportWorker] = None
 
         self._build_menu()
@@ -429,6 +472,7 @@ class MainWindow(QMainWindow):
 
         self.actions_panel = ActionsPanel(self)
         self.actions_panel.installRequested.connect(self._on_install_livery)
+        self.actions_panel.quickInstallRequested.connect(self._on_quick_install)
         self.actions_panel.exportRequested.connect(self._on_export_zip)
         self.actions_panel.restoreRequested.connect(self._on_restore_backup)
         right_layout.addWidget(self.actions_panel)
@@ -796,8 +840,90 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Installation Error", f"Failed to install livery:\n{err}")
 
     # ==========================================================================
+    # Quick Livery File Installation Workflow (Direct File Install, No AI)
+    # ==========================================================================
+
+    def _on_quick_install(self):
+        car_folder = self.deployment_panel.get_car_folder()
+        if not car_folder:
+            QMessageBox.warning(self, "Invalid Car Folder", "Please select or enter a target car folder.")
+            return
+
+        livery_id = self.deployment_panel.get_livery_id()
+        team_name = self.deployment_panel.get_team_name()
+        driver = self.deployment_panel.get_driver()
+        finish = self.preview_panel.get_finish()
+
+        # 1. File picker for livery texture file
+        file_filter = "Livery Images (*.dds *.png *.jpg *.jpeg *.bmp *.tga *.webp);;DDS Textures (*.dds);;All Files (*.*)"
+        chosen_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Livery Texture File to Install",
+            "",
+            file_filter,
+        )
+        if not chosen_file:
+            return
+
+        texture_path = Path(chosen_file)
+        if not texture_path.exists():
+            QMessageBox.warning(self, "File Not Found", f"The selected file does not exist:\n{texture_path}")
+            return
+
+        # 2. Optional custom preview thumbnail
+        custom_preview = None
+        reply = QMessageBox.question(
+            self,
+            "Preview Thumbnail",
+            "Would you like to select a custom in-game preview thumbnail (e.g. 252x64 showroom screenshot)?\n\n"
+            "• Click 'Yes' to choose an image file\n"
+            "• Click 'No' to auto-generate thumbnail from the livery texture",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+        elif reply == QMessageBox.StandardButton.Yes:
+            prev_filter = "Image Files (*.png *.jpg *.jpeg *.bmp *.tga *.webp);;All Files (*.*)"
+            prev_file, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Preview Thumbnail Image (252x64)",
+                "",
+                prev_filter,
+            )
+            if prev_file:
+                try:
+                    with Image.open(prev_file) as pimg:
+                        custom_preview = pimg.convert("RGBA").copy()
+                except Exception as e:
+                    QMessageBox.warning(
+                        self,
+                        "Preview Load Failed",
+                        f"Could not load custom preview image ({e}). Auto-generating fallback thumbnail instead.",
+                    )
+                    custom_preview = None
+
+        ext_label = texture_path.suffix.upper()
+        finish_desc = "preserving original alpha" if texture_path.suffix.lower() == ".dds" else f"{finish} finish"
+        self._set_busy(True, f"Quick-installing {ext_label} livery '{team_name}' #{livery_id} ({finish_desc})...")
+
+        self._quick_install_worker = QuickInstallWorker(
+            file_path=texture_path,
+            car_folder=car_folder,
+            livery_id=livery_id,
+            team_name=team_name,
+            driver=driver,
+            finish_type=finish,
+            custom_preview_image=custom_preview,
+        )
+        self._quick_install_worker.success.connect(self._on_install_success)
+        self._quick_install_worker.error.connect(self._on_install_error)
+        self._quick_install_worker.start()
+
+    # ==========================================================================
     # ZIP Export Workflow
     # ==========================================================================
+
 
     def _on_export_zip(self):
         texture = self.preview_panel.get_generated_image()

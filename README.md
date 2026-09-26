@@ -63,6 +63,12 @@ A desktop application in Python (PySide6) that automates the creation and instal
    - One-click rollback dialog to restore previous XML backups.
    - **Standalone ZIP Export** for sharing on modding hubs (Overtake.gg).
 
+10. **Direct Pre-Made Livery Installation (No AI Needed)**:
+   - Install pre-made `.dds`, `.png`, `.jpg`, `.tga`, or `.bmp` liveries sent by friends or downloaded from mod sites.
+   - Preserves original Alpha channel reflectivity on DDS textures; applies chosen finish to PNG/JPG.
+   - Optional custom menu preview thumbnail picker with auto flatpack fallback.
+   - Automatically handles 4K resizing, mipmap generation, target folder creation, and XML override updates.
+
 ---
 
 ## 🚀 Getting Started
@@ -120,7 +126,8 @@ python main.py
    - Select the car folder (e.g. `bmw_m4_gt3`) and Livery ID (e.g. `51`).
    - Enter your Team Name and Driver Name.
 5. **Section 5: Deploy or Export**:
-   - Click **💾 Install to AMS2 (Auto-Backup)** for instant in-game installation.
+   - Click **💾 Install to AMS2 (Auto-Backup)** for instant in-game installation of your generated design.
+   - Or click **📥 Quick Install Livery File...** to directly install a friend's `.dds`, `.png`, or `.jpg` livery file into the selected car slot without using AI.
    - Or click **📦 Export as Shareable ZIP** to package a drop-in mod archive.
 
 ---

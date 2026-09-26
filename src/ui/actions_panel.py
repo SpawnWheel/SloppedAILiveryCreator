@@ -119,6 +119,7 @@ class ActionsPanel(QGroupBox):
     """Panel for installation, export, and rollback actions."""
 
     installRequested = Signal()
+    quickInstallRequested = Signal()
     exportRequested = Signal()
     restoreRequested = Signal()
 
@@ -131,7 +132,7 @@ class ActionsPanel(QGroupBox):
         layout.setSpacing(10)
         layout.setContentsMargins(10, 14, 10, 10)
 
-        # 1. Install Button (Primary)
+        # 1. Install Button (Primary, AI/Current Canvas)
         self.btn_install = QPushButton("💾 Install to AMS2 (Auto-Backup)")
         self.btn_install.setFixedHeight(40)
         self.btn_install.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -158,7 +159,37 @@ class ActionsPanel(QGroupBox):
         self.btn_install.clicked.connect(self.installRequested.emit)
         layout.addWidget(self.btn_install)
 
-        # 2. Export Button
+        # 2. Quick Install Button (Pre-made livery file, skips AI)
+        self.btn_quick_install = QPushButton("📥 Quick Install Livery File...")
+        self.btn_quick_install.setFixedHeight(36)
+        self.btn_quick_install.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_quick_install.setToolTip(
+            "Directly install a DDS, PNG, JPG, or TGA livery file to AMS2 without AI generation"
+        )
+        self.btn_quick_install.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #e65100;
+                color: #ffffff;
+                font-size: 12px;
+                font-weight: bold;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 14px;
+            }
+            QPushButton:hover {
+                background-color: #f57c00;
+            }
+            QPushButton:disabled {
+                background-color: #3b2314;
+                color: #705545;
+            }
+            """
+        )
+        self.btn_quick_install.clicked.connect(self.quickInstallRequested.emit)
+        layout.addWidget(self.btn_quick_install)
+
+        # 3. Export Button
         self.btn_export = QPushButton("📦 Export as Shareable ZIP")
         self.btn_export.setFixedHeight(36)
         self.btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -185,7 +216,7 @@ class ActionsPanel(QGroupBox):
         self.btn_export.clicked.connect(self.exportRequested.emit)
         layout.addWidget(self.btn_export)
 
-        # 3. Restore Button
+        # 4. Restore Button
         self.btn_restore = QPushButton("↺ Restore Previous Backup")
         self.btn_restore.setFixedHeight(32)
         self.btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -214,5 +245,7 @@ class ActionsPanel(QGroupBox):
 
     def set_busy(self, is_busy: bool):
         self.btn_install.setEnabled(not is_busy)
+        self.btn_quick_install.setEnabled(not is_busy)
         self.btn_export.setEnabled(not is_busy)
         self.btn_restore.setEnabled(not is_busy)
+
