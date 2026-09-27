@@ -27,7 +27,8 @@ from PySide6.QtWidgets import (
 
 from src.ui.widgets.annotation_canvas import AnnotationCanvas, ToolType
 from src.ui.widgets.preview_thumbnail_box import PreviewThumbnailBox
-from src.utils.constants import DEFAULT_FINISH, FINISH_ALPHA_MAP
+from src.core.config import config
+from src.utils.constants import DEFAULT_FINISH, FINISH_ALPHA_MAP, normalize_finish
 
 
 class LiveryRevision:
@@ -38,6 +39,7 @@ class LiveryRevision:
         self.notes = notes
         self.label = label
         self.committed = False
+        self.project = None  # layered Paint Editor project (ProjectData) if this version was hand-painted
 
 
 class PreviewPanel(QGroupBox):
@@ -47,11 +49,12 @@ class PreviewPanel(QGroupBox):
     """
 
     generateRequested = Signal()
+    promptPackRequested = Signal()  # "Copy for other AI": export prompt + images instead of generating
     refineRequested = Signal(str)  # refinement_notes
-    rerollRequested = Signal()
     commitRequested = Signal()
     finishChanged = Signal(str)
     loadLiveryRequested = Signal()
+    paintEditorRequested = Signal()
     customPreviewChanged = Signal(object)  # Optional[Image.Image]
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -78,15 +81,25 @@ class PreviewPanel(QGroupBox):
         vp_controls = QHBoxLayout()
         vp_controls.setSpacing(8)
 
-        finish_label = QLabel("Finish:")
+        finish_label = QLabel("Gloss:")
         finish_label.setStyleSheet("color: #b0b0b0; font-size: 11px; font-weight: bold;")
         vp_controls.addWidget(finish_label)
 
         self.combo_finish = QComboBox()
         for finish in FINISH_ALPHA_MAP.keys():
             self.combo_finish.addItem(finish)
-        self.combo_finish.setCurrentText(DEFAULT_FINISH)
-        self.combo_finish.currentTextChanged.connect(self.finishChanged.emit)
+        self.combo_finish.setCurrentText(normalize_finish(config.get("default_finish", DEFAULT_FINISH)))
+        self.combo_finish.setToolTip(
+            "How glossy the paint looks in game (written into the texture's alpha channel on install).\n\n"
+            "This is NOT the same as the Base Livery in section 4:\n"
+            "  • Base Livery = which stock paint shader the car uses (normal, Matte, Chrome, Metallic...\n"
+            "    whatever that car offers) plus every texture you don't replace (rims, glass...).\n"
+            "  • Gloss = how strongly that base paint's shine shows on your design.\n\n"
+            "Gloss 255 · Semi-Gloss 210 · Satin 170 · Matte 80.\n"
+            "Want chrome or metallic? Pick a Chrome/Metallic base livery if the car has one and leave this on Gloss.\n"
+            "It does not change the AI image - the AI always paints flat colour."
+        )
+        self.combo_finish.currentTextChanged.connect(self._on_finish_changed)
         self.combo_finish.setStyleSheet(
             """
             QComboBox {
@@ -101,6 +114,12 @@ class PreviewPanel(QGroupBox):
             """
         )
         vp_controls.addWidget(self.combo_finish)
+
+        # Shows which base paint the gloss is applied on, so the two settings read as one thing
+        self.lbl_base_hint = QLabel("")
+        self.lbl_base_hint.setStyleSheet("color: #7d8594; font-size: 10px;")
+        self.lbl_base_hint.setToolTip(self.combo_finish.toolTip())
+        vp_controls.addWidget(self.lbl_base_hint)
 
         res_badge = QLabel("4K (4096px)")
         res_badge.setStyleSheet(
@@ -125,6 +144,31 @@ class PreviewPanel(QGroupBox):
         vp_controls.addWidget(self.check_overlay)
 
         vp_controls.addStretch()
+
+        self.btn_paint = QPushButton("🖌 Paint Editor")
+        self.btn_paint.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_paint.setToolTip(
+            "Open the layered Paint Editor on this version: add sponsor PNGs, numbers, lines and paint panels\n"
+            "with the template shown underneath. The result is added as a new version."
+        )
+        self.btn_paint.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #3a2b47;
+                border: 1px solid #5d3d70;
+                border-radius: 4px;
+                color: #e1b3ff;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #4b3763; color: #ffffff; }
+            QPushButton:disabled { background-color: #1d1b22; color: #4a4552; border-color: #2a2730; }
+            """
+        )
+        self.btn_paint.setEnabled(False)
+        self.btn_paint.clicked.connect(self.paintEditorRequested.emit)
+        vp_controls.addWidget(self.btn_paint)
 
         self.btn_load_existing = QPushButton("📂 Load Livery to Edit...")
         self.btn_load_existing.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -240,7 +284,7 @@ class PreviewPanel(QGroupBox):
         )
         layout.addWidget(self.notes_input)
 
-        # 7. Main Action Buttons Row: Generate, Refine, Re-roll
+        # 7. Main Action Buttons Row: Generate, Refine
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
 
@@ -270,6 +314,37 @@ class PreviewPanel(QGroupBox):
         self.btn_generate.clicked.connect(self.generateRequested.emit)
         btn_row.addWidget(self.btn_generate, 2)
 
+        self.btn_prompt_pack = QPushButton("📋 Copy for Other AI")
+        self.btn_prompt_pack.setFixedHeight(36)
+        self.btn_prompt_pack.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_prompt_pack.setToolTip(
+            "Don't generate here: save the prompt + template + reference images to a folder and copy them to the "
+            "clipboard, ready to paste into ChatGPT, Gemini or any other AI website"
+        )
+        self.btn_prompt_pack.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #37474f;
+                color: #ffffff;
+                font-size: 12px;
+                font-weight: bold;
+                border: 1px solid #0078d4;
+                border-radius: 5px;
+                padding: 5px 10px;
+            }
+            QPushButton:hover {
+                background-color: #455a64;
+            }
+            QPushButton:disabled {
+                background: #252830;
+                color: #555c68;
+                border-color: #333945;
+            }
+            """
+        )
+        self.btn_prompt_pack.clicked.connect(self.promptPackRequested.emit)
+        btn_row.addWidget(self.btn_prompt_pack, 2)
+
         self.btn_refine = QPushButton("🔄 Refine with AI")
         self.btn_refine.setFixedHeight(36)
         self.btn_refine.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -297,13 +372,6 @@ class PreviewPanel(QGroupBox):
         self.btn_refine.setEnabled(False)
         self.btn_refine.clicked.connect(self._on_refine_clicked)
         btn_row.addWidget(self.btn_refine, 2)
-
-        self.btn_reroll = QPushButton("⟳ Re-roll")
-        self.btn_reroll.setFixedHeight(36)
-        self.btn_reroll.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_reroll.setStyleSheet(self._btn_secondary_style())
-        self.btn_reroll.clicked.connect(self.rerollRequested.emit)
-        btn_row.addWidget(self.btn_reroll, 1)
 
         layout.addLayout(btn_row)
 
@@ -418,11 +486,12 @@ class PreviewPanel(QGroupBox):
         self.canvas.clear_annotations()
         self._update_revision_ui()
 
-    def add_revision(self, new_image: Image.Image, notes: str = "", label: str = ""):
-        """Adds a newly refined livery version to the history stack."""
+    def add_revision(self, new_image: Image.Image, notes: str = "", label: str = "", project=None):
+        """Adds a new livery version (AI refinement or hand-painted) to the history stack."""
         rev_num = len(self.revisions) + 1
         rev_label = label or f"v{rev_num}"
         rev = LiveryRevision(new_image, notes=notes, label=rev_label)
+        rev.project = project
         self.revisions.append(rev)
         self.current_rev_idx = len(self.revisions) - 1
         self.canvas.clear_annotations()
@@ -451,6 +520,7 @@ class PreviewPanel(QGroupBox):
             self.btn_next_rev.setEnabled(False)
             self.btn_commit.setEnabled(False)
             self.btn_refine.setEnabled(False)
+            self.btn_paint.setEnabled(False)
             self.lbl_commit_status.hide()
             self.canvas.set_texture(None)
             self.preview_box.set_auto_texture(None)
@@ -465,6 +535,7 @@ class PreviewPanel(QGroupBox):
         self.btn_next_rev.setEnabled(self.current_rev_idx < total - 1)
         self.btn_commit.setEnabled(True)
         self.btn_refine.setEnabled(True)
+        self.btn_paint.setEnabled(True)
 
         # Update status badge
         self.lbl_commit_status.show()
@@ -507,6 +578,11 @@ class PreviewPanel(QGroupBox):
             return self.revisions[self.current_rev_idx].image
         return self.canvas.get_base_image()
 
+    def current_revision(self) -> Optional[LiveryRevision]:
+        if 0 <= self.current_rev_idx < len(self.revisions):
+            return self.revisions[self.current_rev_idx]
+        return None
+
     def get_annotated_image(self) -> Optional[Image.Image]:
         """Returns base texture composited with user's drawings."""
         return self.canvas.get_annotated_image()
@@ -526,12 +602,32 @@ class PreviewPanel(QGroupBox):
     def get_finish(self) -> str:
         return self.combo_finish.currentText()
 
+    def _on_finish_changed(self, name: str) -> None:
+        config.set("default_finish", name)
+        self.finishChanged.emit(name)
+
+    def set_base_livery_hint(self, base_name: str) -> None:
+        """Called when the Base Livery (section 4) changes: shows what the gloss level is applied on."""
+        base_name = (base_name or "").strip()
+        self.lbl_base_hint.setText(f"on '{base_name}' base paint" if base_name else "")
+        lowered = base_name.lower()
+        if any(k in lowered for k in ("matte", "chrome", "metal", "satin", "pearl")):
+            self.lbl_base_hint.setStyleSheet("color: #e0a040; font-size: 10px;")
+            self.lbl_base_hint.setToolTip(
+                f"'{base_name}' has its own special paint shader. Gloss scales how much of it shows:\n"
+                "keep Gloss for the full effect, lower values tone it down."
+            )
+        else:
+            self.lbl_base_hint.setStyleSheet("color: #7d8594; font-size: 10px;")
+            self.lbl_base_hint.setToolTip(self.combo_finish.toolTip())
+
     def set_busy(self, is_busy: bool, message: str = ""):
         self.btn_generate.setEnabled(not is_busy)
+        self.btn_prompt_pack.setEnabled(not is_busy)
         self.btn_refine.setEnabled(not is_busy and len(self.revisions) > 0)
-        self.btn_reroll.setEnabled(not is_busy)
         self.btn_commit.setEnabled(not is_busy and len(self.revisions) > 0)
         self.btn_load_existing.setEnabled(not is_busy)
+        self.btn_paint.setEnabled(not is_busy and len(self.revisions) > 0)
 
         if is_busy:
             if "Refin" in message:

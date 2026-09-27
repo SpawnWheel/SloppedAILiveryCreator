@@ -9,6 +9,7 @@ from PIL import Image
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.dds_converter import DDSConverter
+from src.core.image_io import load_any_image
 from src.core.installer import LiveryInstaller
 from src.core.xml_manager import XMLManager
 from src.utils.constants import SUPPORTED_IMAGE_EXTS
@@ -38,7 +40,8 @@ class LoadLiveryDialog(QDialog):
     either from AMS2 Overrides car XMLs or directly from DDS/PNG/JPG files.
     """
 
-    liverySelected = Signal(object, object, str, int, str)  # (texture, preview, car, id, team_name)
+    # (texture, preview, car, id, team_name, meta) - meta: {"base_livery": str, "extra_images": {NAME: Image}}
+    liverySelected = Signal(object, object, str, int, str, object)
 
     def __init__(self, initial_car: str = "", parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -246,16 +249,13 @@ class LoadLiveryDialog(QDialog):
             self.list_liveries.setCurrentRow(0)
 
     def _browse_file(self):
-        filter_str = "Livery Files (*.dds *.png *.jpg *.jpeg *.tga *.bmp);;All Files (*.*)"
+        filter_str = "Livery Files (*.dds *.png *.jpg *.jpeg *.tga *.bmp *.webp *.psd);;All Files (*.*)"
         fpath, _ = QFileDialog.getOpenFileName(self, "Open Existing Livery Texture", "", filter_str)
         if fpath:
             self.edit_file_path.setText(fpath)
             try:
                 p = Path(fpath)
-                if p.suffix.lower() == ".dds":
-                    img = DDSConverter.load_dds_image(p)
-                else:
-                    img = Image.open(p).convert("RGBA")
+                img = load_any_image(p)
                 self.selected_texture = img
                 w, h = img.size
                 self.lbl_file_info.setText(f"✅ Loaded {p.name} ({w} × {h} px)")
@@ -286,13 +286,21 @@ class LoadLiveryDialog(QDialog):
             team = entry.get("name", "Custom Team")
 
             try:
-                tex_img, prev_img, _ = LiveryInstaller.load_installed_livery(car, lid)
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                try:
+                    tex_img, prev_img, meta = LiveryInstaller.load_installed_livery(car, lid)
+                finally:
+                    QApplication.restoreOverrideCursor()
                 self.selected_texture = tex_img
                 self.selected_preview = prev_img
                 self.selected_car = car
                 self.selected_id = lid
                 self.selected_team = team
-                self.liverySelected.emit(tex_img, prev_img, car, lid, team)
+                extras = meta.get("extra_images") or {}
+                self.liverySelected.emit(
+                    tex_img, prev_img, car, lid, team,
+                    {"base_livery": meta.get("base_livery", ""), "extra_images": extras},
+                )
                 self.accept()
             except Exception as e:
                 QMessageBox.critical(self, "Load Error", f"Failed to load installed livery:\n{e}")
@@ -305,13 +313,12 @@ class LoadLiveryDialog(QDialog):
                     return
                 p = Path(path_str)
                 try:
-                    if p.suffix.lower() == ".dds":
-                        self.selected_texture = DDSConverter.load_dds_image(p)
-                    else:
-                        self.selected_texture = Image.open(p).convert("RGBA")
+                    self.selected_texture = load_any_image(p)
                 except Exception as e:
                     QMessageBox.critical(self, "Load Error", f"Could not open file:\n{e}")
                     return
 
-            self.liverySelected.emit(self.selected_texture, None, "", 51, Path(self.edit_file_path.text()).stem)
+            self.liverySelected.emit(
+                self.selected_texture, None, "", 0, Path(self.edit_file_path.text()).stem, {}
+            )
             self.accept()

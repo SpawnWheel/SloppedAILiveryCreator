@@ -7,35 +7,67 @@ import os
 
 # Application Info
 APP_NAME = "AMS2 AI Livery Studio"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_ORGANIZATION = "SimModding"
 
-# Finish Types to Alpha Values (0-255)
-# AMS2 Shader rules:
-# Alpha controls reflectivity / glossiness in the livery DDS (BC3 / DXT5 format)
-# 255 (White) = High Gloss / Highly reflective
-# 210 = Semi-Gloss
-# 170 = Satin / Eggshell
-# 80  = Matte (low reflectivity)
-# Metallic = 200 (combined with BASELIVERY metallic shaders)
-# Chrome = 255
+# Gloss level -> BODY alpha value (0-255).
+# In AMS2 the BODY texture's alpha channel is the "paint fx" mask (see any car's _dist.xml): it controls how
+# strongly the BASE LIVERY's paint shader (clear-coat gloss, metallic flake, chrome...) shows through.
+#   255 = full effect of the base paint (glossy on a normal base)
+#    80 = mostly flat / matte
+# The *type* of paint (metallic, chrome, matte shader) comes from the Base Livery chosen in section 4;
+# this setting only controls how much of it you get. That's why "Metallic" / "Chrome" are not options here -
+# pick a Metallic / Chrome base livery instead (if the car has one).
 FINISH_ALPHA_MAP = {
-    "Full Gloss": 255,
+    "Gloss": 255,
     "Semi-Gloss": 210,
     "Satin": 170,
     "Matte": 80,
-    "Metallic": 200,
-    "Chrome": 255,
 }
 
-DEFAULT_FINISH = "Matte"
+# Older names (saved configs, exported ZIP notes, tests) -> current names
+FINISH_ALIASES = {
+    "Full Gloss": "Gloss",
+    "Chrome": "Gloss",
+    "Metallic": "Semi-Gloss",
+}
+
+DEFAULT_FINISH = "Gloss"
+
+
+def normalize_finish(name: str) -> str:
+    """Maps any finish name (current or legacy, any case) onto a key of FINISH_ALPHA_MAP."""
+    if not name:
+        return DEFAULT_FINISH
+    for key in FINISH_ALPHA_MAP:
+        if key.lower() == name.strip().lower():
+            return key
+    for old, new in FINISH_ALIASES.items():
+        if old.lower() == name.strip().lower():
+            return new
+    return DEFAULT_FINISH
 
 # Texture Resolution
 DEFAULT_RESOLUTION = 4096  # Standard 4K livery texture
 
-# UI Preview Thumbnail specs for AMS2
-PREVIEW_WIDTH = 252
-PREVIEW_HEIGHT = 64
+# UI Preview image spec for AMS2.
+# Every car's <car>_dist.xml states: "a PREVIEWIMAGE element ... for use in the game's UI (2048 x 600 px)"
+PREVIEW_WIDTH = 2048
+PREVIEW_HEIGHT = 600
+
+# Texture slots the studio knows how to build, keyed by the AMS2 <TEXTURE NAME="..."> value.
+# Specs come straight from the car _dist.xml files shipped with AMS2:
+#   BODY          - 4096 x 4096, DXT5 with MIPs (alpha channel = paint fx)
+#   WHEELDIFF     - rim_diff      - Wheel rim texture            - 1024 x 1024, DXT1 with MIPs
+#   WHEELBLURDIFF - rim_blur_diff - Wheel rim (spinning) texture - 1024 x 1024, DXT5 with MIPs
+TEXTURE_SPECS = {
+    "BODY": {"file": "body", "size": 4096, "format": "BC3_UNORM", "label": "Body Livery"},
+    "WHEELDIFF": {"file": "wheel_diff", "size": 1024, "format": "BC1_UNORM", "label": "Wheel Rim"},
+    "WHEELBLURDIFF": {"file": "wheel_blur_diff", "size": 1024, "format": "BC3_UNORM", "label": "Wheel Rim (Blur / Spinning)"},
+}
+WHEEL_TEXTURE_NAMES = ["WHEELDIFF", "WHEELBLURDIFF"]
+
+DEFAULT_BASE_LIVERY = "Default"
 
 # Reference Image Roles
 REFERENCE_ROLES = [
@@ -49,6 +81,12 @@ SUPPORTED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".psd", ".webp"
 SUPPORTED_ARCHIVE_EXTS = {".zip"}
 SUPPORTED_LIVERY_INSTALL_EXTS = {".dds", ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".webp"}
 
+# File dialog filter for anything the studio can open as a texture / template
+IMAGE_OPEN_FILTER = (
+    "Images & Templates (*.png *.jpg *.jpeg *.bmp *.tga *.webp *.psd *.dds);;"
+    "PNG (*.png);;DDS Textures (*.dds);;Photoshop (*.psd);;All Files (*.*)"
+)
+
 # External Tools
 TEXCONV_DOWNLOAD_URL = (
     "https://github.com/microsoft/DirectXTex/releases/latest/download/texconv.exe"
@@ -60,6 +98,8 @@ FALLBACK_AI_MODEL = "gemini-3-pro-image"
 AVAILABLE_AI_MODELS = [
     "gemini-3.1-flash-image",
     "gemini-3-pro-image",
+    "gemini-3.1-flash-image-preview",
+    "gemini-3-pro-image-preview",
     "gemini-2.5-flash-image",
 ]
 

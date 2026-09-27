@@ -272,7 +272,7 @@ class TestUIWidgets(unittest.TestCase):
 
         eff_auto = box.get_effective_preview_thumbnail()
         self.assertIsNotNone(eff_auto)
-        self.assertEqual(eff_auto.size, (252, 64))
+        self.assertEqual(eff_auto.size, (2048, 600))
         self.assertIsNone(box.get_custom_preview())
 
         # Set custom preview
@@ -280,7 +280,7 @@ class TestUIWidgets(unittest.TestCase):
         box.set_custom_preview(custom_shot)
         self.assertIsNotNone(box.get_custom_preview())
         eff_custom = box.get_effective_preview_thumbnail()
-        self.assertEqual(eff_custom.size, (252, 64))
+        self.assertEqual(eff_custom.size, (2048, 600))
 
         # Reset
         box.clear_custom_preview()
@@ -335,3 +335,40 @@ class TestUIWidgets(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class TestGlossAndFlatPrompt(unittest.TestCase):
+    """Gloss level naming (incl. legacy names) and the flat/unlit colour prompt rules."""
+
+    def test_legacy_finish_names_map_to_alpha(self):
+        from PIL import Image
+        from src.core.image_processor import ImageProcessor
+        from src.utils.constants import normalize_finish
+
+        self.assertEqual(normalize_finish("Full Gloss"), "Gloss")
+        self.assertEqual(normalize_finish("chrome"), "Gloss")
+        self.assertEqual(normalize_finish("Metallic"), "Semi-Gloss")
+        self.assertEqual(normalize_finish("matte"), "Matte")
+        self.assertEqual(normalize_finish("nonsense"), "Gloss")
+        img = Image.new("RGB", (8, 8), (10, 20, 30))
+        self.assertEqual(ImageProcessor.apply_finish(img, "Gloss").getchannel("A").getpixel((0, 0)), 255)
+        self.assertEqual(ImageProcessor.apply_finish(img, "Full Gloss").getchannel("A").getpixel((0, 0)), 255)
+        self.assertEqual(ImageProcessor.apply_finish(img, "Matte").getchannel("A").getpixel((0, 0)), 80)
+
+    def test_default_finish_is_gloss(self):
+        from src.utils.constants import DEFAULT_FINISH
+        self.assertEqual(DEFAULT_FINISH, "Gloss")
+
+    def test_prompts_ask_for_flat_unlit_colour_and_omit_finish(self):
+        from src.core.ai_engine import AIEngine, FLAT_COLOUR_RULES
+
+        prompt = AIEngine.build_default_user_prompt(
+            car_name="bmw_m4_gt3", template_name="tpl.png", user_guidance="blue with orange stripe", finish="Matte"
+        )
+        self.assertNotIn("Paint Finish", prompt)
+        self.assertNotIn("Matte", prompt)
+        self.assertIn("unlit", prompt.lower())
+        self.assertIn("FLAT UNLIT COLOUR", AIEngine.build_default_system_instruction())
+        self.assertIn("FLAT UNLIT COLOUR", AIEngine.build_refinement_system_instruction())
+        self.assertIn("no reflections", FLAT_COLOUR_RULES.lower())
+        self.assertIn("exception", FLAT_COLOUR_RULES.lower())

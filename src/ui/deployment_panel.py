@@ -27,14 +27,17 @@ from src.core.xml_manager import XMLManager
 
 
 class DeploymentPanel(QGroupBox):
-    """Panel for configuring the target AMS2 car model, livery ID, and team metadata."""
+    """Panel for configuring the target AMS2 car model, livery ID, base livery and team metadata."""
 
     configChanged = Signal()
+    profileChanged = Signal(object)  # CarProfile
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__("4. AMS2 TARGET & DEPLOYMENT", parent)
+        self.profile = None
         self._build_ui()
         self._populate_car_folders()
+        self._reload_profile()
         self.check_id_collision()
 
     def _build_ui(self):
@@ -117,6 +120,22 @@ class DeploymentPanel(QGroupBox):
         id_layout.addStretch()
 
         form_layout.addRow("Livery ID:", id_layout)
+
+        # 2b. Base livery (read from the car's _dist.xml). Anything you don't override - e.g. wheels,
+        #     tyres, windows - comes from this base livery.
+        self.combo_base = QComboBox()
+        self.combo_base.setEditable(True)
+        self.combo_base.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.combo_base.setToolTip(
+            "The stock AMS2 livery your design is built on (listed in the car's _dist.xml).\n"
+            "  • Every texture you don't replace - rims, tyres, windows, some carbon parts - comes from it.\n"
+            "  • It sets the paint SHADER: a 'Matte', 'Chrome' or 'Metallic' base gives that paint type.\n\n"
+            "The Gloss setting next to the preview is separate: it controls how strongly this base\n"
+            "paint's shine shows on your design (alpha channel). 'Default' is the car's normal gloss paint."
+        )
+        self.combo_base.setStyleSheet(self.combo_car.styleSheet())
+        self.combo_base.currentTextChanged.connect(lambda _: self.configChanged.emit())
+        form_layout.addRow("Base Livery:", self.combo_base)
 
         # 3. Team Name
         self.edit_team = QLineEdit(config.get("last_team_name", "Gulf Sim Racing"))
@@ -207,11 +226,13 @@ class DeploymentPanel(QGroupBox):
             config.ams2_overrides_path = parent_dir
             self._populate_car_folders()
             self.combo_car.setCurrentText(chosen_path.name.lower())
+            self._reload_profile()
             config.set("last_car_folder", chosen_path.name.lower())
         # Case 2: User pointed to the Overrides folder itself
         elif chosen_path.name.lower() == "overrides" or sum(1 for _ in chosen_path.iterdir()) > 5:
             config.ams2_overrides_path = chosen_path
             self._populate_car_folders()
+            self._reload_profile()
         # Case 3: Custom external car folder
         else:
             car_name = chosen_path.name.lower()
@@ -225,8 +246,43 @@ class DeploymentPanel(QGroupBox):
 
     def _on_car_changed(self, text: str):
         config.set("last_car_folder", text)
+        self._reload_profile()
         self.check_id_collision()
         self.configChanged.emit()
+
+    def _reload_profile(self):
+        """Reads the car's _dist.xml to list its base liveries and supported textures."""
+        car = self.get_car_folder()
+        if not car:
+            return
+        try:
+            self.profile = LiveryInstaller.get_car_profile(car)
+        except Exception as e:
+            print(f"[DeploymentPanel] profile error: {e}")
+            return
+        previous = self.combo_base.currentText()
+        self.combo_base.blockSignals(True)
+        self.combo_base.clear()
+        for b in self.profile.base_liveries:
+            self.combo_base.addItem(b)
+        if previous and previous in self.profile.base_liveries:
+            self.combo_base.setCurrentText(previous)
+        else:
+            self.combo_base.setCurrentIndex(0)
+        self.combo_base.blockSignals(False)
+        self.profileChanged.emit(self.profile)
+
+    def get_base_livery(self) -> str:
+        return self.combo_base.currentText().strip() or (
+            self.profile.default_base_livery if self.profile else "Default"
+        )
+
+    def set_base_livery(self, name: str) -> None:
+        if not name:
+            return
+        if self.combo_base.findText(name) == -1:
+            self.combo_base.addItem(name)
+        self.combo_base.setCurrentText(name)
 
     def _on_id_changed(self, val: int):
         config.set("last_livery_id", val)

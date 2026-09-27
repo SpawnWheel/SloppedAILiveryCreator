@@ -6,12 +6,13 @@ Integrates all panels, async worker threads, settings, and menus.
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from PIL import Image
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -34,11 +36,14 @@ from src.core.exporter import LiveryExporter
 from src.core.installer import LiveryInstaller
 from src.ui.actions_panel import ActionsPanel, BackupRestoreDialog
 from src.ui.deployment_panel import DeploymentPanel
+from src.ui.editor.livery_editor import LiveryPaintEditor
 from src.ui.load_livery_dialog import LoadLiveryDialog
 from src.ui.preview_panel import PreviewPanel
 from src.ui.prompt_dialog import PromptEditorDialog
+from src.ui.prompt_pack_dialog import PromptPackDialog, copy_pack_to_clipboard
 from src.ui.reference_panel import ReferencePanel
 from src.ui.widgets.status_bar import CustomStatusBar
+from src.ui.wheels_panel import WheelsPanel
 from src.ui.wireframe_panel import WireframePanel
 from src.utils.constants import (
     APP_NAME,
@@ -47,6 +52,7 @@ from src.utils.constants import (
     DEFAULT_AI_MODEL,
     FALLBACK_AI_MODEL,
     SUPPORTED_LIVERY_INSTALL_EXTS,
+    TEXTURE_SPECS,
 )
 from src.utils.file_helpers import cleanup_dir, get_cache_dir, slugify
 
@@ -147,7 +153,7 @@ class SettingsDialog(QDialog):
 class GenerationWorker(QThread):
     """Background worker for AI generation to prevent UI freezes."""
 
-    finished = Signal(object)  # PIL.Image
+    finished = Signal(object, str)  # (PIL.Image, template-fit report)
     error = Signal(str)
 
     def __init__(
@@ -176,15 +182,34 @@ class GenerationWorker(QThread):
                 system_instruction=self.system_instruction,
                 target_resolution=self.target_resolution,
             )
-            self.finished.emit(img)
+            img, report = fit_to_template(img, self.wireframe)
+            self.finished.emit(img, report)
         except Exception as e:
             self.error.emit(str(e))
+
+
+def fit_to_template(img: Image.Image, wireframe: Optional[Image.Image],
+                    previous: Optional[Image.Image] = None):
+    """Applies the 'Lock to template' post-processing (auto-align + clip to UV islands) if enabled."""
+    if not config.get("lock_to_template", True) or (wireframe is None and previous is None):
+        return img, ""
+    try:
+        from src.core.template_fit import lock_to_template
+
+        out, report = lock_to_template(img, wireframe, previous=previous,
+                                       do_clip=config.get("clip_to_islands", True))
+        if out.size != img.size:
+            out = out.resize(img.size, Image.Resampling.LANCZOS)
+        return out, report.summary()
+    except Exception as e:  # never lose a paid-for generation over post-processing
+        print(f"[TemplateFit] skipped: {e}")
+        return img, ""
 
 
 class RefinementWorker(QThread):
     """Background worker for iterative livery refinement with Gemini multimodal generation."""
 
-    finished = Signal(object)  # PIL.Image
+    finished = Signal(object, str)  # (PIL.Image, template-fit report)
     error = Signal(str)
 
     def __init__(
@@ -231,7 +256,8 @@ class RefinementWorker(QThread):
                     iteration=self.iteration,
                     target_resolution=self.target_resolution,
                 )
-            self.finished.emit(img)
+            img, report = fit_to_template(img, self.wireframe, previous=self.current_livery)
+            self.finished.emit(img, report)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -251,6 +277,8 @@ class InstallWorker(QThread):
         texture_image: Image.Image,
         finish_type: str,
         custom_preview_image: Optional[Image.Image] = None,
+        base_livery: str = "Default",
+        extra_textures: Optional[Dict[str, Image.Image]] = None,
     ):
         super().__init__()
         self.car_folder = car_folder
@@ -260,6 +288,8 @@ class InstallWorker(QThread):
         self.texture_image = texture_image
         self.finish_type = finish_type
         self.custom_preview_image = custom_preview_image
+        self.base_livery = base_livery
+        self.extra_textures = extra_textures or {}
 
     def run(self):
         try:
@@ -271,6 +301,8 @@ class InstallWorker(QThread):
                 texture_image=self.texture_image,
                 finish_type=self.finish_type,
                 custom_preview_image=self.custom_preview_image,
+                base_livery=self.base_livery,
+                extra_textures=self.extra_textures,
             )
             self.success.emit(target_dir, backup)
         except Exception as e:
@@ -293,8 +325,12 @@ class ExportWorker(QThread):
         output_zip_path: Path,
         finish_type: str,
         custom_preview_image: Optional[Image.Image] = None,
+        base_livery: str = "Default",
+        extra_textures: Optional[Dict[str, Image.Image]] = None,
     ):
         super().__init__()
+        self.base_livery = base_livery
+        self.extra_textures = extra_textures or {}
         self.car_folder = car_folder
         self.livery_id = livery_id
         self.team_name = team_name
@@ -315,6 +351,8 @@ class ExportWorker(QThread):
                 output_zip_path=self.output_zip_path,
                 finish_type=self.finish_type,
                 custom_preview_image=self.custom_preview_image,
+                base_livery=self.base_livery,
+                extra_textures=self.extra_textures,
             )
             self.success.emit(out_path)
         except Exception as e:
@@ -336,8 +374,10 @@ class QuickInstallWorker(QThread):
         driver: str,
         finish_type: str,
         custom_preview_image: Optional[Image.Image] = None,
+        base_livery: str = "Default",
     ):
         super().__init__()
+        self.base_livery = base_livery
         self.file_path = file_path
         self.car_folder = car_folder
         self.livery_id = livery_id
@@ -356,6 +396,7 @@ class QuickInstallWorker(QThread):
                 driver=self.driver,
                 finish_type=self.finish_type,
                 custom_preview_image=self.custom_preview_image,
+                base_livery=self.base_livery,
             )
             self.success.emit(target_dir, backup)
         except Exception as e:
@@ -398,6 +439,16 @@ class MainWindow(QMainWindow):
         action_open_livery.triggered.connect(self._open_load_livery_dialog)
         file_menu.addAction(action_open_livery)
 
+        action_pack = QAction("&Copy Prompt + Images for Other AI...", self)
+        action_pack.setShortcut("Ctrl+Shift+C")
+        action_pack.triggered.connect(self._on_create_prompt_pack)
+        file_menu.addAction(action_pack)
+
+        action_import_ext = QAction("&Import Result from Other AI...", self)
+        action_import_ext.triggered.connect(lambda: self._import_external_result())
+        file_menu.addAction(action_import_ext)
+        file_menu.addSeparator()
+
         action_settings = QAction("&Settings / API Key...", self)
         action_settings.triggered.connect(self._open_settings)
         file_menu.addAction(action_settings)
@@ -415,12 +466,37 @@ class MainWindow(QMainWindow):
         action_open_ams2.triggered.connect(self._open_overrides_folder)
         tools_menu.addAction(action_open_ams2)
 
+        action_paint = QAction("&Paint Editor (current version)...", self)
+        action_paint.setShortcut("Ctrl+E")
+        action_paint.triggered.connect(self._open_paint_editor)
+        tools_menu.addAction(action_paint)
+        tools_menu.addSeparator()
+
+        action_align = QAction("Re-&align Current Version to Template", self)
+        action_align.setToolTip("Snap a drifted AI result back onto the template's panels")
+        action_align.triggered.connect(self._realign_current)
+        tools_menu.addAction(action_align)
+
+        self.action_lock = QAction("&Lock AI Results to Template (auto-align)", self, checkable=True)
+        self.action_lock.setChecked(config.get("lock_to_template", True))
+        self.action_lock.toggled.connect(lambda v: config.set("lock_to_template", v))
+        tools_menu.addAction(self.action_lock)
+
+        self.action_clip = QAction("&Clip AI Paint to UV Islands", self, checkable=True)
+        self.action_clip.setChecked(config.get("clip_to_islands", True))
+        self.action_clip.toggled.connect(lambda v: config.set("clip_to_islands", v))
+        tools_menu.addAction(self.action_clip)
+        tools_menu.addSeparator()
+
         action_clear_cache = QAction("&Clear Template Cache", self)
         action_clear_cache.triggered.connect(self._clear_cache)
         tools_menu.addAction(action_clear_cache)
 
         # Help Menu
         help_menu = menu_bar.addMenu("&Help")
+        action_wheels = QAction("How do &wheels / rims work?", self)
+        action_wheels.triggered.connect(self._show_wheels_help)
+        help_menu.addAction(action_wheels)
         action_about = QAction("&About", self)
         action_about.triggered.connect(self._show_about)
         help_menu.addAction(action_about)
@@ -464,11 +540,44 @@ class MainWindow(QMainWindow):
 
         self.preview_panel = PreviewPanel(self)
         self.preview_panel.generateRequested.connect(self._on_generate_livery)
+        self.preview_panel.promptPackRequested.connect(self._on_create_prompt_pack)
         self.preview_panel.refineRequested.connect(self._on_refine_livery)
-        self.preview_panel.rerollRequested.connect(self._on_reroll_livery)
         self.preview_panel.commitRequested.connect(self._on_commit_livery)
         self.preview_panel.loadLiveryRequested.connect(self._open_load_livery_dialog)
-        right_layout.addWidget(self.preview_panel, 1)
+        self.preview_panel.paintEditorRequested.connect(self._open_paint_editor)
+
+        # Keep the Gloss control's "on '<base>' base paint" hint in sync with section 4's Base Livery
+        self.deployment_panel.configChanged.connect(
+            lambda: self.preview_panel.set_base_livery_hint(self.deployment_panel.get_base_livery())
+        )
+        self.deployment_panel.profileChanged.connect(
+            lambda _p: self.preview_panel.set_base_livery_hint(self.deployment_panel.get_base_livery())
+        )
+        self.preview_panel.set_base_livery_hint(self.deployment_panel.get_base_livery())
+
+        self.wheels_panel = WheelsPanel(
+            ai_engine=self.ai_engine,
+            body_provider=self.preview_panel.get_generated_image,
+            parent=self,
+        )
+        self.wheels_panel.statusMessage.connect(self.status_bar_message)
+        self.wheels_panel.busyChanged.connect(self._on_wheels_busy)
+        self.wheels_panel.paintEditorRequested.connect(self._open_wheel_editor)
+
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setStyleSheet(
+            """
+            QTabWidget::pane { border: none; }
+            QTabBar::tab { background-color: #232730; color: #b0b8c6; padding: 6px 18px;
+                           border-top-left-radius: 5px; border-top-right-radius: 5px; margin-right: 2px;
+                           font-weight: bold; font-size: 11px; }
+            QTabBar::tab:selected { background-color: #0078d4; color: #ffffff; }
+            """
+        )
+        self.right_tabs.addTab(self.preview_panel, "🏎  Body Livery")
+        self.right_tabs.addTab(self.wheels_panel, "🛞  Wheels / Rims")
+        self.right_tabs.currentChanged.connect(lambda i: i == 1 and self.wheels_panel.refresh_palette())
+        right_layout.addWidget(self.right_tabs, 1)
 
         self.actions_panel = ActionsPanel(self)
         self.actions_panel.installRequested.connect(self._on_install_livery)
@@ -484,6 +593,19 @@ class MainWindow(QMainWindow):
         # Bottom Custom Status Bar
         self.status_bar = CustomStatusBar(self)
         main_layout.addWidget(self.status_bar)
+
+        self.deployment_panel.profileChanged.connect(self.wheels_panel.set_profile)
+        self.wheels_panel.set_profile(self.deployment_panel.profile)
+
+    def status_bar_message(self, msg: str):
+        self.status_bar.show_info(msg)
+
+    def _on_wheels_busy(self, busy: bool, msg: str):
+        self.actions_panel.set_busy(busy)
+        if busy:
+            self.status_bar.show_busy(msg)
+        else:
+            self.status_bar.show_info("Ready")
 
     def _check_initial_setup(self):
         """Notifies user if API key is needed."""
@@ -514,6 +636,12 @@ class MainWindow(QMainWindow):
         self.status_bar.show_info("Template cache cleared.")
         QMessageBox.information(self, "Cache Cleared", "Offline template cache has been cleaned.")
 
+    def _show_wheels_help(self):
+        from src.ui.wheels_panel import HOW_IT_WORKS
+
+        self.right_tabs.setCurrentWidget(self.wheels_panel)
+        QMessageBox.information(self, "Wheels & rims in AMS2", HOW_IT_WORKS)
+
     def _show_about(self):
         QMessageBox.about(
             self,
@@ -522,7 +650,7 @@ class MainWindow(QMainWindow):
             "AI-Powered Livery Studio for Automobilista 2.<br>"
             "Generates 4K game-ready DDS textures (BC3/DXT5 + Mipmaps) with Alpha-channel reflectivity shaders "
             "and injects them into AMS2's XML override system with automatic backup and rollback.<br><br>"
-            "Built with PySide6, Pillow, DirectXTex texconv, and Google Gemini Pro Image.",
+            "Built with PySide6, Pillow, DirectXTex texconv, and Google Gemini image models.",
         )
 
     # ==========================================================================
@@ -634,10 +762,85 @@ class MainWindow(QMainWindow):
         self._gen_worker.error.connect(self._on_generation_error)
         self._gen_worker.start()
 
-    def _on_generation_finished(self, image: Image.Image):
+    # ==========================================================================
+    # Prompt Pack: use another AI website instead of the built-in Gemini call
+    # ==========================================================================
+
+    def _on_create_prompt_pack(self):
+        """Saves prompt + template + references to a folder and copies them to the clipboard."""
+        from src.core.prompt_pack import create_prompt_pack
+
+        wireframe = self.wireframe_panel.get_wireframe()
+        references = self.reference_panel.get_references()
+        guidance = self.reference_panel.get_prompt()
+        if not wireframe and not guidance and not references:
+            QMessageBox.warning(
+                self,
+                "Input Required",
+                "Please load a wireframe template, enter a design prompt, or upload reference images first.",
+            )
+            return
+
+        custom = self.reference_panel.get_custom_prompt()
+        user_prompt, sys_inst = custom if custom else self._assemble_current_prompts()
+        root = config.get("prompt_pack_dir", "") or None
+        name = self.deployment_panel.get_team_name() or self.deployment_panel.get_car_folder() or "livery"
+        try:
+            pack = create_prompt_pack(wireframe, references, user_prompt, sys_inst, root=root, name=name)
+        except Exception as e:
+            QMessageBox.critical(self, "Prompt Pack Failed", f"Could not create the prompt pack:\n\n{e}")
+            return
+
+        copy_pack_to_clipboard(pack, "all")
+        self._last_pack_dir = pack.folder
+        self.status_bar.show_info(
+            f"Prompt + {len(pack.image_paths)} image(s) copied to clipboard — saved in {pack.folder}"
+        )
+        dialog = PromptPackDialog(pack, parent=self)
+        dialog.importResultRequested.connect(lambda d: self._import_external_result(d, dialog))
+        dialog.exec()
+
+    def _import_external_result(self, start_dir: str = "", dialog: Optional[QDialog] = None):
+        """Loads an image made by another AI, undoes the pack padding, aligns it to the template."""
+        from src.core.image_io import load_any_image
+        from src.core.prompt_pack import find_pack_info, normalize_external_result
+
+        start = start_dir or str(getattr(self, "_last_pack_dir", "") or Path.home() / "Downloads")
+        path, _ = QFileDialog.getOpenFileName(
+            dialog or self, "Import Image from Other AI", start,
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tga *.dds)",
+        )
+        if not path:
+            return
+        try:
+            raw = load_any_image(path)
+            info = find_pack_info(Path(path))
+            if info is None and start_dir:
+                info = find_pack_info(Path(start_dir) / "_")
+            img = normalize_external_result(raw, info)
+            img, report = fit_to_template(img, self.wireframe_panel.get_wireframe())
+        except Exception as e:
+            QMessageBox.critical(dialog or self, "Import Failed", f"Could not import the image:\n\n{e}")
+            return
+
+        pp = self.preview_panel
+        if pp.revisions:  # keep earlier versions; the import becomes the next one
+            pp.add_revision(img, notes="Imported from other AI", label=f"v{len(pp.revisions) + 1} (Other AI)")
+        else:
+            pp.reset_revisions(img, label="v1 (Other AI)")
+        self.wheels_panel.refresh_palette()
+        extra = f" — {report}" if report else ""
+        self.status_bar.show_info(f"Imported {Path(path).name} ({img.size[0]} × {img.size[1]} px){extra}")
+        if dialog is not None:
+            dialog.accept()
+
+    def _on_generation_finished(self, image: Image.Image, report: str = ""):
         self._set_busy(False)
         self.preview_panel.set_generated_image(image, is_refinement=False)
-        self.status_bar.show_info("Livery generated successfully! (4096 × 4096 px)")
+        self.wheels_panel.refresh_palette()
+        w, h = image.size
+        extra = f" — {report}" if report else ""
+        self.status_bar.show_info(f"Livery generated ({w} × {h} px){extra}")
 
     def _on_generation_error(self, err_msg: str):
         self._set_busy(False)
@@ -709,15 +912,40 @@ class MainWindow(QMainWindow):
             iteration=iteration,
             target_resolution=4096,
         )
-        self._refine_worker.finished.connect(lambda img, n=notes: self._on_refinement_finished(img, n))
+        self._refine_worker.finished.connect(lambda img, rep, n=notes: self._on_refinement_finished(img, n, rep))
         self._refine_worker.error.connect(self._on_refinement_error)
         self._refine_worker.start()
 
-    def _on_refinement_finished(self, image: Image.Image, notes: str):
+    def _on_refinement_finished(self, image: Image.Image, notes: str, report: str = ""):
         self._set_busy(False)
         self.preview_panel.set_generated_image(image, is_refinement=True, notes=notes)
         rev_count = len(self.preview_panel.revisions)
-        self.status_bar.show_info(f"Livery refined successfully! (Revision {rev_count})")
+        extra = f" — {report}" if report else ""
+        self.status_bar.show_info(f"Livery refined (Revision {rev_count}){extra}")
+
+    def _realign_current(self):
+        """Tools menu: snap the current version onto the template (fixes older, drifted results)."""
+        rev = self.preview_panel.current_revision()
+        wf = self.wireframe_panel.get_wireframe()
+        if rev is None or wf is None:
+            QMessageBox.information(self, "Re-align", "Load a template in section 1 and have a livery version open first.")
+            return
+        from src.core.template_fit import lock_to_template
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            out, report = lock_to_template(rev.image, wf, do_clip=config.get("clip_to_islands", True))
+            if out.size != rev.image.size:
+                out = out.resize(rev.image.size, Image.Resampling.LANCZOS)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not report.aligned and not report.clipped:
+            QMessageBox.information(self, "Re-align", "Nothing to fix: " + (report.summary() or "no change needed."))
+            return
+        n = len(self.preview_panel.revisions) + 1
+        self.preview_panel.add_revision(out, notes="Re-aligned to template", label=f"v{n} (Aligned)")
+        self.preview_panel.check_overlay.setChecked(True)
+        self.status_bar.show_info(f"v{n}: {report.summary()}")
 
     def _on_refinement_error(self, err_msg: str):
         self._set_busy(False)
@@ -728,14 +956,6 @@ class MainWindow(QMainWindow):
             f"Failed to refine livery texture from AI:\n\n{err_msg}\n\n"
             "Tip: Ensure your API key is valid and has quota for Gemini image models.",
         )
-
-    def _on_reroll_livery(self):
-        """Re-rolls either the current refinement iteration or the initial generation."""
-        if len(self.preview_panel.revisions) > 1 and self.preview_panel.current_rev_idx > 0:
-            notes = self.preview_panel.get_refinement_notes()
-            self._on_refine_livery(notes)
-        else:
-            self._on_generate_livery()
 
     def _on_commit_livery(self):
         curr_idx = self.preview_panel.current_rev_idx + 1
@@ -764,11 +984,12 @@ class MainWindow(QMainWindow):
         car_folder: str,
         livery_id: int,
         team_name: str,
+        meta: Optional[dict] = None,
     ):
+        meta = meta or {}
         label = f"v1 (Loaded: {team_name[:18]})" if team_name else "v1 (Loaded)"
         self.preview_panel.reset_revisions(texture_img, label=label)
-        if preview_img:
-            self.preview_panel.set_custom_preview_image(preview_img)
+        self.preview_panel.set_custom_preview_image(preview_img)
 
         if car_folder:
             if self.deployment_panel.combo_car.findText(car_folder) == -1:
@@ -779,10 +1000,78 @@ class MainWindow(QMainWindow):
             self.deployment_panel.spin_id.setValue(livery_id)
 
         if team_name:
-            self.deployment_panel.edit_team.setText(team_name)
+            # strip the " #51" suffix the installer adds, so re-installing doesn't produce "Team #51 #51"
+            clean = team_name
+            suffix = f" #{livery_id}" if livery_id else ""
+            if suffix and clean.endswith(suffix):
+                clean = clean[: -len(suffix)]
+            self.deployment_panel.edit_team.setText(clean)
+
+        if meta.get("base_livery"):
+            self.deployment_panel.set_base_livery(meta["base_livery"])
+
+        extras = meta.get("extra_images") or {}
+        self.wheels_panel.load_existing(extras)
+        self.wheels_panel.refresh_palette()
 
         self.deployment_panel.check_id_collision()
-        self.status_bar.show_info(f"Loaded existing livery '{team_name}' into editor")
+        wheel_note = " (incl. custom rims)" if extras else ""
+        self.status_bar.show_info(f"Loaded existing livery '{team_name}'{wheel_note} into editor")
+
+    # ==========================================================================
+    # Paint Editor
+    # ==========================================================================
+
+    def _open_paint_editor(self):
+        rev = self.preview_panel.current_revision()
+        if rev is None:
+            QMessageBox.information(self, "Paint Editor", "Generate or load a livery first.")
+            return
+        guide = self.wireframe_panel.get_wireframe()
+        editor = LiveryPaintEditor(
+            base_image=rev.image,
+            guide_image=guide,
+            title=f"Livery Paint Editor — {rev.label}",
+            project=rev.project,
+            parent=self,
+        )
+        if guide is None and rev.project is None:
+            editor._flash("No template loaded in section 1 - use 'Load / change template image…' on the right "
+                          "to see panel outlines while you paint.")
+        editor.showMaximized()
+        if editor.exec() == QDialog.DialogCode.Accepted and editor.result_image() is not None:
+            img = editor.result_image()
+            if img.size != rev.image.size:
+                img = img.resize(rev.image.size, Image.Resampling.LANCZOS)
+            n = len(self.preview_panel.revisions) + 1
+            self.preview_panel.add_revision(
+                img, notes="Hand-painted in Paint Editor", label=f"v{n} (Hand-painted)",
+                project=editor.project_data(),
+            )
+            self.wheels_panel.refresh_palette()
+            self.status_bar.show_info(f"Hand-painted version v{n} added. Use ◀ Prev to compare with the previous one.")
+
+    def _open_wheel_editor(self, slot: str):
+        img = self.wheels_panel.get_slot_image(slot)
+        if img is None:
+            QMessageBox.information(
+                self, "Wheels",
+                "Load the rim texture from your car's template pack first (📂 Load texture…).",
+            )
+            return
+        guide = self.wheels_panel.get_slot_template(slot)
+        editor = LiveryPaintEditor(
+            base_image=img,
+            guide_image=guide,
+            title=f"Wheel Paint Editor — {TEXTURE_SPECS[slot]['label']}",
+            parent=self,
+        )
+        editor.doc.guide_opacity = 0.0 if guide is None else 0.25
+        editor.sl_guide.setValue(int(editor.doc.guide_opacity * 100))
+        editor.showMaximized()
+        if editor.exec() == QDialog.DialogCode.Accepted and editor.result_image() is not None:
+            self.wheels_panel.set_slot_result(slot, editor.result_image())
+            self.status_bar.show_info(f"{TEXTURE_SPECS[slot]['label']} updated from the Paint Editor.")
 
     # ==========================================================================
     # Installation Workflow
@@ -807,7 +1096,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid Car Folder", "Please select or enter a target car folder.")
             return
 
-        self._set_busy(True, f"Installing '{team_name}' #{livery_id} to AMS2 ({finish} finish)...")
+        wheels = self.wheels_panel.get_extra_textures()
+        wheel_txt = " + custom rims" if wheels else ""
+        self._set_busy(True, f"Installing '{team_name}' #{livery_id}{wheel_txt} to AMS2 ({finish} finish)...")
 
         self._install_worker = InstallWorker(
             car_folder=car_folder,
@@ -817,6 +1108,8 @@ class MainWindow(QMainWindow):
             texture_image=texture,
             finish_type=finish,
             custom_preview_image=custom_preview,
+            base_livery=self.deployment_panel.get_base_livery(),
+            extra_textures=self.wheels_panel.get_extra_textures(),
         )
         self._install_worker.success.connect(self._on_install_success)
         self._install_worker.error.connect(self._on_install_error)
@@ -826,6 +1119,8 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
         self.deployment_panel.check_id_collision()
         msg = f"Livery successfully installed to:\n{target_dir}\n\n"
+        if any(target_dir.glob("wheel_*.dds")):
+            msg += "Custom wheel rims installed too.\n\n"
         if backup_path:
             msg += f"Backup created:\n{backup_path.name}"
         else:
@@ -875,7 +1170,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             "Preview Thumbnail",
-            "Would you like to select a custom in-game preview thumbnail (e.g. 252x64 showroom screenshot)?\n\n"
+            "Would you like to select a custom in-game preview image (2048x600, e.g. a showroom screenshot)?\n\n"
             "• Click 'Yes' to choose an image file\n"
             "• Click 'No' to auto-generate thumbnail from the livery texture",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
@@ -887,7 +1182,7 @@ class MainWindow(QMainWindow):
             prev_filter = "Image Files (*.png *.jpg *.jpeg *.bmp *.tga *.webp);;All Files (*.*)"
             prev_file, _ = QFileDialog.getOpenFileName(
                 self,
-                "Select Preview Thumbnail Image (252x64)",
+                "Select Preview Image (2048x600)",
                 "",
                 prev_filter,
             )
@@ -915,6 +1210,7 @@ class MainWindow(QMainWindow):
             driver=driver,
             finish_type=finish,
             custom_preview_image=custom_preview,
+            base_livery=self.deployment_panel.get_base_livery(),
         )
         self._quick_install_worker.success.connect(self._on_install_success)
         self._quick_install_worker.error.connect(self._on_install_error)
@@ -958,6 +1254,8 @@ class MainWindow(QMainWindow):
             output_zip_path=Path(save_path),
             finish_type=finish,
             custom_preview_image=custom_preview,
+            base_livery=self.deployment_panel.get_base_livery(),
+            extra_textures=self.wheels_panel.get_extra_textures(),
         )
         self._export_worker.success.connect(self._on_export_success)
         self._export_worker.error.connect(self._on_export_error)
@@ -1003,8 +1301,27 @@ class MainWindow(QMainWindow):
                 self.status_bar.show_error(str(e))
                 QMessageBox.critical(self, "Restore Failed", f"Failed to restore backup:\n{e}")
 
+    def closeEvent(self, event):
+        workers = [self._gen_worker, self._refine_worker, self._install_worker,
+                   self._quick_install_worker, self._export_worker, getattr(self.wheels_panel, "_worker", None)]
+        running = [w for w in workers if w is not None and w.isRunning()]
+        if running:
+            res = QMessageBox.question(
+                self, "Work in progress",
+                "A generation / install is still running. Quit anyway?\n"
+                "(An install interrupted half-way can leave files incomplete.)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if res != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            for w in running:
+                w.wait(3000)
+        super().closeEvent(event)
+
     def _set_busy(self, is_busy: bool, message: str = ""):
-        self.preview_panel.set_busy(is_busy)
+        self.preview_panel.set_busy(is_busy, message)
         self.actions_panel.set_busy(is_busy)
         if is_busy:
             self.status_bar.show_busy(message)

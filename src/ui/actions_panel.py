@@ -128,13 +128,16 @@ class ActionsPanel(QGroupBox):
         self._build_ui()
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
+        from PySide6.QtWidgets import QGridLayout
+
+        layout = QGridLayout(self)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
         layout.setContentsMargins(10, 14, 10, 10)
 
         # 1. Install Button (Primary, AI/Current Canvas)
         self.btn_install = QPushButton("💾 Install to AMS2 (Auto-Backup)")
-        self.btn_install.setFixedHeight(40)
+        self.btn_install.setFixedHeight(38)
         self.btn_install.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_install.setStyleSheet(
             """
@@ -157,11 +160,11 @@ class ActionsPanel(QGroupBox):
             """
         )
         self.btn_install.clicked.connect(self.installRequested.emit)
-        layout.addWidget(self.btn_install)
+        layout.addWidget(self.btn_install, 0, 0, 1, 2)
 
         # 2. Quick Install Button (Pre-made livery file, skips AI)
         self.btn_quick_install = QPushButton("📥 Quick Install Livery File...")
-        self.btn_quick_install.setFixedHeight(36)
+        self.btn_quick_install.setFixedHeight(32)
         self.btn_quick_install.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_quick_install.setToolTip(
             "Directly install a DDS, PNG, JPG, or TGA livery file to AMS2 without AI generation"
@@ -187,11 +190,11 @@ class ActionsPanel(QGroupBox):
             """
         )
         self.btn_quick_install.clicked.connect(self.quickInstallRequested.emit)
-        layout.addWidget(self.btn_quick_install)
+        layout.addWidget(self.btn_quick_install, 1, 0)
 
         # 3. Export Button
         self.btn_export = QPushButton("📦 Export as Shareable ZIP")
-        self.btn_export.setFixedHeight(36)
+        self.btn_export.setFixedHeight(32)
         self.btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_export.setStyleSheet(
             """
@@ -214,11 +217,11 @@ class ActionsPanel(QGroupBox):
             """
         )
         self.btn_export.clicked.connect(self.exportRequested.emit)
-        layout.addWidget(self.btn_export)
+        layout.addWidget(self.btn_export, 1, 1)
 
         # 4. Restore Button
         self.btn_restore = QPushButton("↺ Restore Previous Backup")
-        self.btn_restore.setFixedHeight(32)
+        self.btn_restore.setFixedHeight(28)
         self.btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_restore.setStyleSheet(
             """
@@ -239,9 +242,7 @@ class ActionsPanel(QGroupBox):
             """
         )
         self.btn_restore.clicked.connect(self.restoreRequested.emit)
-        layout.addWidget(self.btn_restore)
-
-        layout.addStretch()
+        layout.addWidget(self.btn_restore, 2, 0, 1, 2)
 
     def set_busy(self, is_busy: bool):
         self.btn_install.setEnabled(not is_busy)

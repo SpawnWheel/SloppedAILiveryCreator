@@ -6,14 +6,15 @@ import datetime
 import os
 import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from PIL import Image
 
 from src.core.config import config
 from src.core.dds_converter import DDSConverter
 from src.core.image_processor import ImageProcessor
 from src.core.xml_manager import XMLManager
-from src.utils.constants import get_default_ams2_path
+from src.core.car_profile import CarProfile, load_car_profile
+from src.utils.constants import DEFAULT_BASE_LIVERY, TEXTURE_SPECS, get_default_ams2_path
 from src.utils.file_helpers import slugify
 
 # Built-in car folder suggestions when Overrides folder is empty / not yet created
@@ -78,6 +79,61 @@ class LiveryInstaller:
         """
         car_dir = LiveryInstaller.get_overrides_path() / car_folder_name
         return car_dir / f"{car_folder_name}.xml"
+
+    @staticmethod
+    def get_car_profile(car_folder_name: str) -> CarProfile:
+        """Reads the car's _dist.xml to learn its base liveries and overridable textures (e.g. wheels)."""
+        return load_car_profile(LiveryInstaller.get_overrides_path(), car_folder_name)
+
+    @staticmethod
+    def build_livery_assets(
+        skin_dir: Path,
+        texture_image: Image.Image,
+        finish_type: str = "Gloss",
+        custom_preview_image: Optional[Image.Image] = None,
+        extra_textures: Optional[Dict[str, Image.Image]] = None,
+    ) -> Dict[str, Path]:
+        """
+        Builds every DDS for one livery into `skin_dir` and returns {TEXTURE_NAME or 'PREVIEW': path}.
+          BODY          -> body.dds (4096, BC3/DXT5 + mips, alpha = finish / paint fx)
+          PREVIEW       -> preview.dds (2048x600, BC1/DXT1)
+          WHEELDIFF     -> wheel_diff.dds (1024, BC1/DXT1 + mips)
+          WHEELBLURDIFF -> wheel_blur_diff.dds (1024, BC3/DXT5 + mips)
+        finish_type "__preserve__" keeps the incoming alpha channel untouched.
+        """
+        skin_dir.mkdir(parents=True, exist_ok=True)
+        out: Dict[str, Path] = {}
+
+        if finish_type == "__preserve__":
+            processed = texture_image.convert("RGBA")
+        else:
+            processed = ImageProcessor.apply_finish(texture_image, finish_type)
+        processed = ImageProcessor.resize_texture(processed, TEXTURE_SPECS["BODY"]["size"])
+        out["BODY"] = DDSConverter.convert_image_to_dds(
+            image=processed, output_dir=skin_dir, base_filename="body",
+            format_type="BC3_UNORM", generate_mipmaps=True,
+        )
+
+        preview_src = custom_preview_image if custom_preview_image is not None else texture_image
+        out["PREVIEW"] = DDSConverter.convert_image_to_dds(
+            image=ImageProcessor.generate_preview_thumbnail(preview_src), output_dir=skin_dir,
+            base_filename="preview", format_type="BC1_UNORM", generate_mipmaps=False,
+        )
+
+        for name, img in (extra_textures or {}).items():
+            if img is None:
+                continue
+            spec = TEXTURE_SPECS.get(name.upper())
+            if spec is None:
+                continue
+            tex = ImageProcessor.resize_texture(img.convert("RGBA"), spec["size"])
+            if spec["format"].startswith("BC1"):
+                tex = ImageProcessor.flatten_on(tex)
+            out[name.upper()] = DDSConverter.convert_image_to_dds(
+                image=tex, output_dir=skin_dir, base_filename=spec["file"],
+                format_type=spec["format"], generate_mipmaps=True,
+            )
+        return out
 
     @staticmethod
     def create_backup(xml_path: Path) -> Optional[Path]:
@@ -154,7 +210,7 @@ class LiveryInstaller:
             raise ValueError(f"Livery slot #{livery_id} not found in {xml_path.name}")
 
         car_dir = LiveryInstaller.get_overrides_path() / car_folder_name
-        rel_texture = meta.get("texture_path", "").replace("/", "\\")
+        rel_texture = meta.get("texture_path", "").replace("\\", "/").lstrip("/")
         texture_file = car_dir / rel_texture
 
         if not texture_file.exists():
@@ -163,7 +219,7 @@ class LiveryInstaller:
         texture_image = DDSConverter.load_dds_image(texture_file)
 
         preview_image = None
-        rel_preview = meta.get("preview_path", "").replace("/", "\\")
+        rel_preview = meta.get("preview_path", "").replace("\\", "/").lstrip("/")
         if rel_preview:
             preview_file = car_dir / rel_preview
             if preview_file.exists():
@@ -171,6 +227,19 @@ class LiveryInstaller:
                     preview_image = DDSConverter.load_dds_image(preview_file)
                 except Exception as e:
                     print(f"[LiveryInstaller] Could not load preview DDS: {e}")
+
+        # Wheels & other textures the studio can edit
+        extra_images: Dict[str, Image.Image] = {}
+        for name, rel in (meta.get("textures") or {}).items():
+            if name == "BODY" or name not in TEXTURE_SPECS or not rel:
+                continue
+            f = car_dir / rel.replace("\\", "/").lstrip("/")
+            if f.exists():
+                try:
+                    extra_images[name] = DDSConverter.load_dds_image(f)
+                except Exception as e:
+                    print(f"[LiveryInstaller] Could not load {name} texture: {e}")
+        meta["extra_images"] = extra_images
 
         return texture_image, preview_image, meta
 
@@ -181,19 +250,17 @@ class LiveryInstaller:
         team_name: str,
         driver: str,
         texture_image: Image.Image,
-        finish_type: str = "Matte",
-        base_livery: str = "Default",
+        finish_type: str = "Gloss",
+        base_livery: str = DEFAULT_BASE_LIVERY,
         custom_preview_image: Optional[Image.Image] = None,
+        extra_textures: Optional[Dict[str, Image.Image]] = None,
     ) -> Tuple[Path, Optional[Path]]:
         """
-        Performs full installation:
-        1. Injects alpha reflectivity channel according to finish_type.
-        2. Resizes texture to 4096x4096px.
-        3. Generates 252x64 UI preview thumbnail (from custom_preview_image or texture).
-        4. Compresses texture to body.dds (BC3/DXT5 + Mipmaps).
-        5. Compresses thumbnail to preview.dds (BC1/DXT1).
-        6. Creates timestamped backup of the XML.
-        7. Surgically updates the car XML override.
+        Full installation:
+        1. Builds body.dds (alpha finish, 4K, DXT5+mips), preview.dds (2048x600) and any extra
+           textures such as wheel rims (see build_livery_assets).
+        2. Creates a timestamped backup of the car XML.
+        3. Surgically inserts/updates the LIVERY_OVERRIDE (creating the XML from _dist.xml if needed).
 
         Returns: (installed_dir_path, backup_path_or_none)
         """
@@ -202,54 +269,33 @@ class LiveryInstaller:
 
         team_slug = slugify(f"{team_name}_{driver}_{livery_id}")
         target_skin_dir = car_dir / team_slug
-        target_skin_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Process 4K Livery Texture & Inject Alpha
-        if finish_type == "__preserve__":
-            processed_texture = texture_image.convert("RGBA") if texture_image.mode != "RGBA" else texture_image
-        else:
-            processed_texture = ImageProcessor.apply_finish(texture_image, finish_type)
-        processed_texture = ImageProcessor.resize_texture(processed_texture, 4096)
-
-        # 2. Process Preview Thumbnail (custom or flatpack fallback)
-        if custom_preview_image is not None:
-            preview_thumb = ImageProcessor.generate_preview_thumbnail(custom_preview_image)
-        else:
-            preview_thumb = ImageProcessor.generate_preview_thumbnail(texture_image)
-
-        # 3. Convert Livery to DDS (BC3 DXT5 with full mipmaps)
-        body_dds_path = DDSConverter.convert_image_to_dds(
-            image=processed_texture,
-            output_dir=target_skin_dir,
-            base_filename="body",
-            format_type="BC3_UNORM",
-            generate_mipmaps=True,
+        built = LiveryInstaller.build_livery_assets(
+            skin_dir=target_skin_dir,
+            texture_image=texture_image,
+            finish_type=finish_type,
+            custom_preview_image=custom_preview_image,
+            extra_textures=extra_textures,
         )
 
-        # 4. Convert Preview to DDS (BC1 DXT1)
-        preview_dds_path = DDSConverter.convert_image_to_dds(
-            image=preview_thumb,
-            output_dir=target_skin_dir,
-            base_filename="preview",
-            format_type="BC1_UNORM",
-            generate_mipmaps=False,
-        )
-
-        # 5. XML Management & Backup
         xml_path = LiveryInstaller.get_car_xml_path(car_folder_name)
         backup_path = LiveryInstaller.create_backup(xml_path)
 
-        rel_body = f"{team_slug}\\body.dds"
-        rel_preview = f"{team_slug}\\preview.dds"
+        extra_rel = {
+            name: f"{team_slug}\\{path.name}"
+            for name, path in built.items()
+            if name not in ("BODY", "PREVIEW")
+        }
         display_title = f"{team_name} #{livery_id}" if str(livery_id) not in team_name else team_name
 
         XMLManager.upsert_livery(
             xml_path=xml_path,
             livery_id=livery_id,
             team_name=display_title,
-            rel_body_path=rel_body,
-            rel_preview_path=rel_preview,
+            rel_body_path=f"{team_slug}\\body.dds",
+            rel_preview_path=f"{team_slug}\\preview.dds",
             base_livery=base_livery,
+            extra_textures=extra_rel,
         )
 
         return target_skin_dir, backup_path
@@ -261,7 +307,7 @@ class LiveryInstaller:
         livery_id: int,
         team_name: str,
         driver: str,
-        finish_type: str = "Matte",
+        finish_type: str = "Gloss",
         base_livery: str = "Default",
         custom_preview_image: Optional[Image.Image] = None,
     ) -> Tuple[Path, Optional[Path]]:

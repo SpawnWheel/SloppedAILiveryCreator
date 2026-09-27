@@ -146,7 +146,7 @@ class ReferencePanel(QGroupBox):
 
         self.prompt_text = QTextEdit()
         self.prompt_text.setPlaceholderText(
-            "e.g. 1970s retro Gulf theme, racing number #42, matte finish, vibrant light blue body with bright orange center racing stripe, vintage sponsor decals (Gulf, Heuer, Firestone) on hood and side panels, driver name 'D. Born' on side windows..."
+            "e.g. 1970s retro Gulf theme, racing number #42, vibrant light blue body with bright orange center racing stripe, vintage sponsor decals (Gulf, Heuer, Firestone) on hood and side panels, driver name 'D. Born' on side windows..."
         )
         self.prompt_text.setMinimumHeight(80)
         self.prompt_text.setStyleSheet(

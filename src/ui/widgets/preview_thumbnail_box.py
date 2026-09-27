@@ -1,5 +1,5 @@
 """
-In-Game UI Menu Preview Thumbnail Widget (252x64 px).
+In-Game UI Menu Preview Widget (AMS2 PREVIEWIMAGE, 2048x600 px).
 Displays either auto-generated flatpack thumbnail or user-uploaded custom preview image.
 """
 
@@ -26,7 +26,7 @@ from src.utils.constants import SUPPORTED_IMAGE_EXTS
 
 class PreviewThumbnailBox(QFrame):
     """
-    Widget allowing user to preview and upload a custom 252x64 UI menu thumbnail,
+    Widget allowing user to preview and upload a custom 2048x600 UI menu preview image,
     or default to auto-generating it from the livery texture.
     """
 
@@ -58,9 +58,9 @@ class PreviewThumbnailBox(QFrame):
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(10)
 
-        # 1. 252x64 Thumbnail Display Label (scaled smoothly, e.g. 150x38 or 180x46 for compact UI)
+        # 1. Preview display label (scaled-down 2048x600 preview)
         self.thumb_label = QLabel()
-        self.thumb_label.setFixedSize(168, 43)  # Exact 252x64 aspect ratio (4:1 approx)
+        self.thumb_label.setFixedSize(168, 49)  # 2048x600 aspect ratio (~3.4:1)
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_label.setStyleSheet(
             """
@@ -78,7 +78,7 @@ class PreviewThumbnailBox(QFrame):
         info_col.setSpacing(2)
         info_col.setContentsMargins(0, 0, 0, 0)
 
-        self.title_label = QLabel("In-Game Menu Preview (252×64):")
+        self.title_label = QLabel("In-Game Menu Preview (2048×600):")
         self.title_label.setStyleSheet("color: #b0b0b0; font-size: 11px; font-weight: bold;")
         info_col.addWidget(self.title_label)
 
@@ -168,7 +168,7 @@ class PreviewThumbnailBox(QFrame):
         return self._custom_preview
 
     def get_effective_preview_thumbnail(self) -> Optional[Image.Image]:
-        """Returns the 252x64 PIL thumbnail image ready for DDS compression."""
+        """Returns the full-size (2048x600) preview image ready for DDS compression."""
         if self._custom_preview is not None:
             return ImageProcessor.generate_preview_thumbnail(self._custom_preview)
         elif self._current_texture is not None:
@@ -196,8 +196,12 @@ class PreviewThumbnailBox(QFrame):
             QMessageBox.critical(self, "Load Error", f"Failed to load preview image:\n{e}")
 
     def _update_display(self) -> None:
-        thumb = self.get_effective_preview_thumbnail()
+        src = self._custom_preview if self._custom_preview is not None else self._current_texture
+        thumb = ImageProcessor.generate_preview_thumbnail(src, 336, 98) if src is not None else None
         if thumb is not None:
+            self.thumb_label.setStyleSheet(
+                "QLabel { background-color: #121418; border: 1px solid #3c404b; border-radius: 4px; }"
+            )
             rgb = thumb.convert("RGB")
             data = rgb.tobytes("raw", "RGB")
             qimg = QImage(data, rgb.width, rgb.height, QImage.Format.Format_RGB888)
@@ -209,6 +213,7 @@ class PreviewThumbnailBox(QFrame):
             )
             self.thumb_label.setPixmap(pix)
         else:
+            self.thumb_label.clear()
             self.thumb_label.setText("No Preview")
             self.thumb_label.setStyleSheet(
                 "background-color: #121418; color: #555c68; font-size: 10px; border: 1px dashed #2d313b;"
