@@ -47,7 +47,7 @@ from src.ui.qt_image import pil_to_qpixmap
 HOW_IT_WORKS = (
     "<b>How wheels work in AMS2</b><br>"
     "Your livery only replaces the textures listed in the car's XML. Everything else - including the rims - "
-    "comes from the <b>Base Livery</b> you choose in section 4. So you have two options:<br>"
+    "comes from the <b>Base Livery</b> you choose in the <b>Install &amp; Export</b> tab. So you have two options:<br>"
     "&nbsp;&nbsp;<b>1. Easy:</b> pick a Base Livery whose stock rims you like (e.g. Chrome / Matte variants).<br>"
     "&nbsp;&nbsp;<b>2. Custom rims:</b> load the rim texture from your car's template pack "
     "(files named like <i>rim_diff</i> and <i>rim_blur_diff</i>), then recolour it, let the AI match your livery, "

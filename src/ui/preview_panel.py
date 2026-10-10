@@ -56,9 +56,10 @@ class PreviewPanel(QGroupBox):
     loadLiveryRequested = Signal()
     paintEditorRequested = Signal()
     customPreviewChanged = Signal(object)  # Optional[Image.Image]
+    revisionChanged = Signal()  # current version changed (navigation, new version, reset)
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__("3. PREVIEW, ANNOTATION & REFINEMENT", parent)
+        super().__init__("PREVIEW, ANNOTATION && AI REFINEMENT", parent)
 
         self.revisions: List[LiveryRevision] = []
         self.current_rev_idx: int = -1
@@ -91,7 +92,7 @@ class PreviewPanel(QGroupBox):
         self.combo_finish.setCurrentText(normalize_finish(config.get("default_finish", DEFAULT_FINISH)))
         self.combo_finish.setToolTip(
             "How glossy the paint looks in game (written into the texture's alpha channel on install).\n\n"
-            "This is NOT the same as the Base Livery in section 4:\n"
+            "This is NOT the same as the Base Livery (Install & Export tab):\n"
             "  • Base Livery = which stock paint shader the car uses (normal, Matte, Chrome, Metallic...\n"
             "    whatever that car offers) plus every texture you don't replace (rims, glass...).\n"
             "  • Gloss = how strongly that base paint's shine shows on your design.\n\n"
@@ -145,11 +146,11 @@ class PreviewPanel(QGroupBox):
 
         vp_controls.addStretch()
 
-        self.btn_paint = QPushButton("🖌 Paint Editor")
+        self.btn_paint = QPushButton("🖌 Edit in Paint Editor")
         self.btn_paint.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_paint.setToolTip(
-            "Open the layered Paint Editor on this version: add sponsor PNGs, numbers, lines and paint panels\n"
-            "with the template shown underneath. The result is added as a new version."
+            "Open this version in the Paint Editor tab: select template panels, paint inside them, add sponsor\n"
+            "PNGs and numbers that stay within their panels. Applying adds the result as a new version."
         )
         self.btn_paint.setStyleSheet(
             """
@@ -524,6 +525,7 @@ class PreviewPanel(QGroupBox):
             self.lbl_commit_status.hide()
             self.canvas.set_texture(None)
             self.preview_box.set_auto_texture(None)
+            self.revisionChanged.emit()
             return
 
         rev = self.revisions[self.current_rev_idx]
@@ -553,6 +555,7 @@ class PreviewPanel(QGroupBox):
         # Update viewport & preview
         self.canvas.set_texture(rev.image)
         self.preview_box.set_auto_texture(rev.image)
+        self.revisionChanged.emit()
 
     def _on_refine_clicked(self):
         notes = self.notes_input.toPlainText().strip()
@@ -607,7 +610,7 @@ class PreviewPanel(QGroupBox):
         self.finishChanged.emit(name)
 
     def set_base_livery_hint(self, base_name: str) -> None:
-        """Called when the Base Livery (section 4) changes: shows what the gloss level is applied on."""
+        """Called when the Base Livery (Install & Export tab) changes: shows what the gloss level is applied on."""
         base_name = (base_name or "").strip()
         self.lbl_base_hint.setText(f"on '{base_name}' base paint" if base_name else "")
         lowered = base_name.lower()

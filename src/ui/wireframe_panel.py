@@ -46,7 +46,7 @@ class WireframePanel(QGroupBox):
     wireframeLoaded = Signal(object, str)  # (PIL.Image, display_name)
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__("1. WIREFRAME / TEMPLATE", parent)
+        super().__init__("TEMPLATE / WIREFRAME", parent)
         self.current_wireframe: Optional[Image.Image] = None
         self.current_name: str = ""
         self._url_thread: Optional[URLLoaderThread] = None

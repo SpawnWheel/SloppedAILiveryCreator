@@ -124,7 +124,7 @@ class ActionsPanel(QGroupBox):
     restoreRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__("5. ACTIONS", parent)
+        super().__init__("INSTALL && EXPORT", parent)
         self._build_ui()
 
     def _build_ui(self):

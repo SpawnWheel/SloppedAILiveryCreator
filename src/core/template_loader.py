@@ -83,7 +83,34 @@ class TemplateLoader:
         if composite.mode != "RGBA":
             composite = composite.convert("RGBA")
 
+        TemplateLoader._register_psd_markers(psd, composite)
         return composite, display_name
+
+    @staticmethod
+    def _register_psd_markers(psd, composite: Image.Image) -> None:
+        """
+        Placeholder text layers (e.g. the '35' race numbers in Reiza's templates) carry their exact rotation in the
+        PSD. Recording it lets the app tell the AI - with certainty - which panels are stored sideways/upside-down.
+        """
+        import math
+
+        from src.core import template_fit
+
+        markers = []
+        try:
+            for layer in psd.descendants():
+                if layer.kind != "type" or not layer.is_visible():
+                    continue
+                text = (getattr(layer, "text", "") or "").strip()
+                if not text or len(text) > 12:
+                    continue
+                xx, xy = layer.transform[0], layer.transform[1]
+                rot = math.degrees(math.atan2(xy, xx)) % 360
+                markers.append((text, tuple(layer.bbox), rot))
+        except Exception as e:  # never fail a template load over this
+            print(f"[TemplateLoader] Could not read PSD text layers: {e}")
+        if markers:
+            template_fit.register_markers(composite, markers)
 
     @staticmethod
     def load_from_url(url: str) -> Tuple[Image.Image, str]:

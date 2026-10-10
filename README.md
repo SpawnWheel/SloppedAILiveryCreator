@@ -77,14 +77,27 @@ A desktop application in Python (PySide6) that automates the creation and instal
    - Load the rim texture(s) from the car's template pack, then **Quick recolour** (keeps shading), **✨ Match Livery
      with AI**, or **🖌 Paint by hand**. Installed as `WHEELDIFF` / `WHEELBLURDIFF` next to `body.dds`.
 
-12. **🖌 Paint Editor** (new in 1.1) — a Photoshop-lite window for finishing AI results by hand:
-   - Your template shown over the paint (opacity + blend mode) so you always know where the panels are. Never exported.
-   - Layers: paint layers, **PNG decals / sponsors** (drag & drop, Ctrl+V), live **text** for numbers & names.
-   - Tools: move/scale/rotate/flip, brush, eraser, line, rectangle, ellipse, polygon, **paint bucket that uses the
-     template outlines as walls** (click a panel to paint it), eyedropper.
-   - Remove white/black background from JPG logos, colourise a logo, undo/redo, zoom/pan.
-   - **Apply to Livery** adds a new version (`vN (Hand-painted)`); re-opening that version restores all layers.
-     Save/open layered projects as `.ams2paint`.
+12. **🖌 Paint Editor tab** — a Photoshop / GIMP-style workspace for finishing AI results by hand (or painting a
+    livery from a blank canvas):
+   - **Tabs across the top**: *AI Generation · Paint Editor · Wheels / Rims · Install & Export*. Your edits stay in the
+     Paint tab while you switch around; the current version and an **Install** button are always in the top-right corner.
+   - **Floating toolbox** over the canvas (drag the grip, double-click it for two columns), a context-sensitive
+     **options bar** (size, hardness, opacity, fill settings…), and **dockable panels** — Colour, Template, Panels,
+     Properties, Layers — that you can drag, tab together, float or close. *Window ▸ Reset Workspace* restores the layout.
+   - **Select template panels** (`W`): click a panel, `Shift`+click to add, `Alt`+click to remove, or drag across
+     several. The **Panels** dock lists every panel with tick boxes (double-click to rename, e.g. "Left door").
+     From then on the **brush, eraser, shapes, gradient, bucket, Fill and moving pixels all stay inside the selected
+     panels**.
+   - **PNGs / text placed while panels are selected are clipped to them** — you can still move, scale, rotate and flip
+     them, but they never show outside those panels (*Layer ▸ Release Clip* frees them, *Clip to Selection* re-clips).
+   - Marquee (rectangle / ellipse) and lasso selections, *Select ▸ Grow / Shrink / Feather / Inverse*, marching ants,
+     a dimmed veil outside the selection, copy / paste / **paste in place**, **Layer via Copy** (`Ctrl+J`).
+   - Soft brushes (hardness), gradients (to background colour or to transparent), template-aware bucket fill,
+     recent colours + hex entry, layer drag-to-reorder, right-click canvas menu.
+   - Your template is shown over the paint (opacity + blend mode). Never exported.
+   - **Apply as New Version** adds `vN (Hand-painted)` and keeps you in the editor; re-opening that version restores all
+     layers. Installing / exporting with unapplied edits asks whether to apply them first. Layered projects save as
+     `.ams2paint` (panel clips and panel names included).
 
 13. **📋 Copy for Other AI** — use ChatGPT, Gemini web or any other image AI instead of the built-in Gemini call:
    - The button next to **⚡ Generate Livery** (or *File > Copy Prompt + Images for Other AI*, `Ctrl+Shift+C`) writes a
@@ -115,9 +128,18 @@ in the **Wheels / Rims** tab. You need the rim textures from the car's template 
 
 ## 🖌 Paint Editor shortcuts
 
-`V` move · `B` brush · `E` eraser · `L` line · `U` rectangle · `O` ellipse · `P` polygon · `G` bucket · `I` eyedropper ·
-`T` text · `H`/Space pan · wheel zoom · `[` `]` brush size · `X` swap colours · `Ctrl+Z`/`Ctrl+Y` undo/redo ·
-`Ctrl+0` fit · `Ctrl+J` duplicate layer · `Del` delete layer · arrows nudge a decal (Shift = 10px)
+**Tools:** `V` move · `W` panel select · `M` marquee · `L` lasso · `B` brush · `E` eraser · `Shift+G` gradient ·
+`G` bucket · `N` line · `U` rectangle · `O` ellipse · `P` polygon · `T` text · `I` eyedropper · `H`/Space pan
+
+**Selection:** `Shift` add · `Alt` subtract · `Ctrl+A` all · `Ctrl+Alt+A` all panels · `Ctrl+D` deselect ·
+`Ctrl+Shift+D` reselect · `Ctrl+Shift+I` invert · `Ctrl+H` hide edges
+
+**Edit:** `Ctrl+C` / `Ctrl+X` / `Ctrl+V` (pastes into the selected panels) · `Ctrl+Shift+V` paste in place ·
+`Alt+Backspace` fill selection · `Del` clear selection · `Ctrl+J` layer via copy · `Ctrl+E` merge down ·
+`Ctrl+Alt+G` clip layer to selection · `Ctrl+Z`/`Ctrl+Y` undo/redo · `Ctrl+Enter` apply as new version
+
+**Brush & view:** `[` `]` size · `Shift+[` `Shift+]` hardness · `1`–`0` opacity · `X` swap colours · `D` black/white ·
+wheel zoom · `Ctrl+0` fit · `Ctrl+1` 100% · arrows nudge a decal (Shift = 10px) · `Alt+1`…`Alt+4` switch tabs
 
 ---
 
@@ -160,24 +182,25 @@ python main.py
 
 ## 🏎️ Workflow Guide
 
-1. **Section 1: Ingest Template or Load Existing Livery**:
+1. **AI Generation tab — Template or Existing Livery**:
    - Drag & drop a UV wireframe image or ZIP from your AMS2 template collection.
    - *Or* click **📂 Load Livery to Edit...** to pull an existing car livery from your AMS2 Overrides or an image/DDS file!
-2. **Section 2: Add References & Prompt**:
+2. **AI Generation tab — References & Prompt**:
    - Upload reference images and describe your theme, driver name, and numbers.
-3. **Section 3: Preview, Draw Annotations & Refine**:
+3. **AI Generation tab — Preview, Draw Annotations & Refine**:
    - Click **⚡ Generate Livery** to create the initial design.
    - Use the **Markup Tools** (Pen, Arrow, Box, Text Callout) to circle areas or point arrows directly on the texture.
    - Type feedback in **Refinement Notes** (e.g. *"Make stripes thinner, move decal to door as drawn"*).
    - Click **🔄 Refine with AI** to iterate as many times as you want across versions (`v1`, `v2`, `v3`...).
    - Press **⚡ Generate Livery** again any time for a completely new alternative.
-   - Click **🖌 Paint Editor** to add sponsor PNGs, numbers, lines or paint whole panels by hand.
+   - Switch to the **🖌 Paint Editor** tab (or click **Edit in Paint Editor**) to select panels and paint inside
+     them, add sponsor PNGs and numbers that stay within their panels, then **Apply as New Version**.
    - When satisfied, click **✅ Commit Livery**!
    - Optionally upload a custom screenshot/render in the **In-Game Menu Preview** box, or leave it on Auto (flatpack).
-4. **Section 4: Configure AMS2 Target**:
+4. **Install & Export tab — AMS2 Target**:
    - Select the car folder (e.g. `bmw_m4_gt3`), Livery ID (e.g. `51`) and **Base Livery** (read from the car's `_dist.xml`).
    - Enter your Team Name and Driver Name.
-5. **Section 5: Deploy or Export**:
+5. **Install & Export tab — Deploy or Export** (or the **Install to AMS2** button in the top-right corner):
    - Click **💾 Install to AMS2 (Auto-Backup)** for instant in-game installation of your generated design.
    - Or click **📥 Quick Install Livery File...** to directly install a friend's `.dds`, `.png`, or `.jpg` livery file into the selected car slot without using AI.
    - Or click **📦 Export as Shareable ZIP** to package a drop-in mod archive (includes custom rims, and a README with
@@ -196,6 +219,13 @@ python -m unittest discover -s tests -p "test_*.py" -v
 ## 📝 Changelog
 
 ### Unreleased
+- **Tabbed, Photoshop-style layout**: AI Generation · Paint Editor · Wheels / Rims · Install & Export tabs; the Paint
+  Editor is now a tab with a floating toolbox, options bar and dockable panels instead of a pop-up window.
+- **Panel selection**: select one or more template panels and every paint tool stays inside them; pasted PNGs and text
+  are clipped to the selected panels. Marquee / lasso, grow / shrink / feather / invert, copy / paste in place,
+  layer via copy, soft brushes, gradient tool, recent colours, right-click menu, blank-canvas start.
+- Fixed: re-opening a hand-painted version and cancelling no longer changes that version's stored layers.
+- Fixed: group titles with "&" showed an underscore instead.
 - **📋 Copy for Other AI**: export prompt + template + reference images to a folder and the clipboard, and import the
   other AI's result back as an aligned new version.
 

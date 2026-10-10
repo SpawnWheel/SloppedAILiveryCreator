@@ -50,13 +50,14 @@ def _slug(text: str, fallback: str = "ref") -> str:
 
 
 def build_pack_prompt(user_prompt: str, system_instruction: str, has_template: bool,
-                      n_refs: int, aspect_ratio: str = "1:1") -> str:
+                      n_refs: int, aspect_ratio: str = "1:1", prep=None) -> str:
     """Merges system rules + user prompt + the rules the app normally appends into one pasteable prompt."""
-    from src.core.ai_engine import FLAT_COLOUR_RULES, LAYOUT_LOCK_RULES
+    from src.core.ai_engine import (FLAT_COLOUR_RULES, LAYOUT_LOCK_RULES, OPEN_HOLES_RULES, ORIENTATION_RULES,
+                                    SYMMETRY_RULES, template_block)
 
     attach = []
     if has_template:
-        attach.append("Image 1 = 01_template.png (the UV template / canvas)")
+        attach.append("Image 1 = 01_template.png (the UV layout map / canvas)")
     first_ref = 2 if has_template else 1
     for i in range(n_refs):
         attach.append(f"Image {first_ref + i} = reference image {i + 1}")
@@ -73,9 +74,17 @@ def build_pack_prompt(user_prompt: str, system_instruction: str, has_template: b
         "=== BRIEF ===",
         (user_prompt or "").strip(),
     ]
+    if has_template and "HOW TO READ IMAGE 1" not in (user_prompt or ""):
+        parts += ["", template_block(prep)]
     if has_template and "GEOMETRY LOCK" not in (user_prompt or ""):
         parts += ["", LAYOUT_LOCK_RULES]
-    if "FLAT UNLIT COLOUR" not in (user_prompt or ""):
+    if has_template and "ARTWORK ORIENTATION (" not in (user_prompt or ""):
+        parts += ["", ORIENTATION_RULES]
+    if has_template and "OPEN HOLES / CUT-OUTS" not in (user_prompt or ""):
+        parts += ["", OPEN_HOLES_RULES]
+    if "LEFT/RIGHT SYMMETRY (" not in (user_prompt or ""):
+        parts += ["", SYMMETRY_RULES]
+    if "NO BAKED LIGHTING" not in (user_prompt or ""):
         parts += ["", FLAT_COLOUR_RULES]
     return "\n".join(p for p in parts if p is not None).strip() + "\n"
 
@@ -102,6 +111,7 @@ def create_prompt_pack(
     info = {"created": stamp, "has_template": wireframe is not None}
     aspect = "1:1"
     idx = 1
+    prep = None
 
     if wireframe is not None:
         prep = template_fit.prepare_for_ai(wireframe)
@@ -123,7 +133,7 @@ def create_prompt_pack(
         idx += 1
 
     text = build_pack_prompt(user_prompt, system_instruction, wireframe is not None,
-                             len(references), aspect)
+                             len(references), aspect, prep=prep)
     prompt_path = folder / PROMPT_FILE
     prompt_path.write_text(text, encoding="utf-8")
     (folder / PACK_INFO_FILE).write_text(json.dumps(info, indent=2), encoding="utf-8")

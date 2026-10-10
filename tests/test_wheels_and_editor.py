@@ -7,6 +7,8 @@ import shutil
 import sys
 import tempfile
 import unittest
+
+import numpy as np
 from pathlib import Path
 from unittest.mock import patch
 
@@ -319,7 +321,8 @@ class TestTemplateLock(unittest.TestCase):
         tpl, _ = self._template()
         sent = prepare_for_ai(tpl).image
         lo, hi = sent.convert("L").getextrema()
-        self.assertEqual((lo, hi), (0, 255))  # lines AND background, not a solid black square
+        self.assertEqual(lo, 0)          # black panel outlines ...
+        self.assertGreater(hi, 200)      # ... on light panels - not a solid black square
 
     def test_generate_realigns_drifted_output(self):
         from unittest.mock import MagicMock
@@ -352,3 +355,120 @@ class TestTemplateLock(unittest.TestCase):
         ref = island_mask(tpl, 512)
         self.assertGreater(_iou(ref, island_mask(fixed, 512)), _iou(ref, island_mask(out, 512)) + 0.05)
         self.assertTrue(report.aligned)
+
+
+class TestLowContrastTemplate(unittest.TestCase):
+    """White mesh lines on light grey (e.g. AMS2 Caterham template) used to reach the AI as a blank sheet."""
+
+    @staticmethod
+    def _grey_template(size=1024):
+        from PIL import ImageDraw
+        img = Image.new("RGB", (size, size), (233, 233, 233))
+        d = ImageDraw.Draw(img)
+        s = size / 1024
+        boxes = [(100, 20, 950, 150), (100, 870, 950, 1000), (340, 300, 700, 720), (20, 350, 300, 680)]
+        for l, t, r, b in boxes:
+            box = [v * s for v in (l, t, r, b)]
+            d.rectangle(box, outline=(255, 255, 255), width=2)
+            for x in range(int(box[0]), int(box[2]), int(40 * s)):   # mesh
+                d.line([(x, box[1]), (x, box[3])], fill=(255, 255, 255), width=1)
+        d.text((600 * s, 60 * s), "35", fill=(0, 0, 0))
+        return img, len(boxes)
+
+    def test_panels_detected_and_sent_as_high_contrast_map(self):
+        from src.core import template_fit as tf
+
+        tpl, n = self._grey_template()
+        self.assertIsNotNone(tf.island_mask(tpl, 512))
+        prep = tf.prepare_for_ai(tpl)
+        self.assertEqual(prep.panel_count, n)
+        arr = np.asarray(prep.image)
+        self.assertLess(arr[2, 2].max(), 40)                   # dark background, as the prompt demands
+        self.assertIn("TEMPLATE LAYOUT", prep.layout_text)
+        self.assertIn("P4:", prep.layout_text)
+
+    def test_prompt_contains_map_rules_and_measured_layout(self):
+        from unittest.mock import patch as _patch
+        from src.core.ai_engine import AIEngine
+
+        tpl, _ = self._grey_template()
+        engine = AIEngine(api_key="dummy_key_123")
+        seen = {}
+
+        def fake_run(contents, *a, **kw):
+            seen["prompt"], seen["img"] = contents[-1], contents[0]
+            return Image.new("RGBA", (64, 64))
+
+        with _patch.object(engine, "_run_image_request", side_effect=fake_run):
+            engine.generate_livery(tpl, [], "custom prompt", target_resolution=64)
+        self.assertEqual(seen["prompt"].count("HOW TO READ IMAGE 1"), 1)
+        self.assertIn("TEMPLATE LAYOUT (measured", seen["prompt"])
+        self.assertLess(np.asarray(seen["img"])[2, 2].max(), 40)
+
+    def test_warns_when_ai_ignores_layout(self):
+        from src.core import template_fit as tf
+
+        tpl, _ = self._grey_template()
+        wrong = Image.new("RGBA", (1024, 1024), (18, 20, 24, 255))
+        from PIL import ImageDraw
+        ImageDraw.Draw(wrong).ellipse((200, 200, 800, 800), fill=(220, 60, 0, 255))
+        _, report = tf.lock_to_template(wrong, tpl)
+        self.assertIn("ignored the template layout", report.summary())
+
+
+class TestRotatedPanels(unittest.TestCase):
+    """PSD placeholder rotations -> explicit per-panel orientation + upright repaint pass."""
+
+    @staticmethod
+    def _template():
+        from src.core import template_fit as tf
+        img = Image.new("RGB", (1024, 1024), (233, 233, 233))
+        d = ImageDraw.Draw(img)
+        strips = [(100, 40, 924, 240), (100, 784, 924, 984)]
+        for l, t, r, b in strips:
+            d.rectangle((l, t, r, b), outline=(255, 255, 255), width=2)
+            for x in range(l, r, 40):
+                d.line([(x, t), (x, b)], fill=(255, 255, 255), width=1)
+        # top strip stored upside-down, bottom upright (like Reiza's RSide / LSide '35' layers)
+        tf.register_markers(img, [("35", (500, 100, 600, 180), 180.0), ("35", (500, 844, 600, 924), 0.0)])
+        return img
+
+    def test_orientation_is_explicit_in_layout(self):
+        from src.core import template_fit as tf
+
+        tpl = self._template()
+        a = tf.analyse_template(tpl)
+        self.assertEqual(len(a.panels), 2)
+        rotated = a.rotated_panels()
+        self.assertEqual([(i, r) for i, r, _ in rotated], [(0, 180)])
+        text = tf.prepare_for_ai(tpl).layout_text
+        self.assertIn("P1 is stored UPSIDE-DOWN", text)
+        self.assertIn("P2 is stored UPRIGHT", text)
+
+    def test_upright_pass_rotates_repaint_back_into_panel(self):
+        from src.core.ai_engine import AIEngine
+
+        tpl = self._template()
+        base = Image.new("RGBA", (1024, 1024), (18, 20, 24, 255))
+        calls = []
+
+        def fake(contents, *a, **kw):
+            calls.append(kw.get("label"))
+            up = contents[1].convert("RGB").copy()          # panel shown upright
+            w, h = up.size
+            ImageDraw.Draw(up).rectangle((0, h * 0.6, w * 0.25, h), fill=(0, 255, 0))  # "bottom-left" mark
+            return kw["postprocess"](up)
+
+        engine = AIEngine(api_key="dummy_key_123")
+        with patch.object(engine, "_run_image_request", side_effect=fake):
+            out = engine.fix_rotated_panels(base, tpl, [], "black with flames")
+        self.assertEqual(len(calls), 1)                       # only the rotated panel gets a pass
+        arr = np.asarray(out.convert("RGB")).astype(int)
+        green = (arr[..., 1] > 200) & (arr[..., 0] < 80)
+        ys, xs = np.nonzero(green)
+        self.assertTrue(len(xs) > 0)
+        # upright bottom-left -> after turning back 180 deg it must sit top-right of the top strip
+        self.assertGreater(xs.mean(), 600)
+        self.assertLess(ys.mean(), 140)
+        self.assertFalse(green[700:].any())                  # the upright bottom strip is untouched
+        self.assertIn("P1 repainted upright", engine.last_notes[0])

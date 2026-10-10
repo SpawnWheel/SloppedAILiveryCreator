@@ -16,7 +16,8 @@ import zipfile
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+import numpy as np
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -29,6 +30,8 @@ from PySide6.QtGui import (
     QPolygonF,
     QTransform,
 )
+
+from src.ui.editor.masks import mask_bbox, mask_from_png_bytes, mask_to_alpha_qimage, mask_to_path, mask_to_png_bytes
 
 BLEND_MODES = {
     "Normal": QPainter.CompositionMode.CompositionMode_SourceOver,
@@ -56,10 +59,21 @@ class Layer:
         self.opacity = 1.0
         self.blend = "Normal"
         self.locked = False
+        self.clip: Optional["LayerClip"] = None  # restricts where the layer shows (e.g. selected panels)
 
     # interface
-    def paint(self, painter: QPainter) -> None:  # draws in document coordinates
+    def paint_content(self, painter: QPainter) -> None:
+        """Draws the layer's pixels in document coordinates - no opacity, blend or clip."""
         raise NotImplementedError
+
+    def paint(self, painter: QPainter) -> None:
+        """Fast on-screen drawing: opacity + blend, clip applied as a (hard-edged) clip path."""
+        painter.save()
+        self._apply_common(painter)
+        if self.clip is not None:
+            painter.setClipPath(self.clip.path(), Qt.ClipOperation.IntersectClip)
+        self.paint_content(painter)
+        painter.restore()
 
     def is_item(self) -> bool:
         return False
@@ -78,6 +92,40 @@ class Layer:
         painter.setCompositionMode(BLEND_MODES.get(self.blend, BLEND_MODES["Normal"]))
 
 
+class LayerClip:
+    """
+    A mask (document-size uint8) that limits where a layer is visible. Created when a decal / text is placed
+    while panels are selected, so it can be moved and scaled but never spills onto other panels.
+    """
+
+    def __init__(self, mask: np.ndarray, label: str = ""):
+        self.mask = np.ascontiguousarray(mask, np.uint8)
+        self.label = label
+        self._path: Optional[QPainterPath] = None
+        self._img: Optional[QImage] = None
+        self._bbox: Optional[QRect] = None
+
+    def path(self) -> QPainterPath:
+        if self._path is None:
+            self._path = mask_to_path(self.mask)
+        return self._path
+
+    def qimage(self) -> QImage:
+        if self._img is None:
+            self._img = mask_to_alpha_qimage(self.mask)
+        return self._img
+
+    def bbox(self) -> QRect:
+        if self._bbox is None:
+            self._bbox = mask_bbox(self.mask) or QRect()
+        return self._bbox
+
+    def copy(self) -> "LayerClip":
+        c = LayerClip(self.mask.copy(), self.label)
+        c._path, c._img, c._bbox = self._path, self._img, self._bbox
+        return c
+
+
 class RasterLayer(Layer):
     kind = "raster"
 
@@ -87,11 +135,8 @@ class RasterLayer(Layer):
             image = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
         self.image = image
 
-    def paint(self, painter: QPainter) -> None:
-        painter.save()
-        self._apply_common(painter)
+    def paint_content(self, painter: QPainter) -> None:
         painter.drawImage(0, 0, self.image)
-        painter.restore()
 
 
 class ItemLayer(Layer):
@@ -137,17 +182,26 @@ class ItemLayer(Layer):
     def bounding_rect(self) -> QRectF:
         return QPolygonF(self.corners()).boundingRect()
 
-    def paint(self, painter: QPainter) -> None:
+    def paint_content(self, painter: QPainter) -> None:
         src = self.source()
         if src.isNull():
             return
         painter.save()
-        self._apply_common(painter)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setTransform(self.transform(), True)
         painter.drawImage(0, 0, src)
         painter.restore()
+
+    def clamp_to_clip(self) -> None:
+        """Keeps the item's centre inside its clip area so it can't be dragged off and lost."""
+        if self.clip is None:
+            return
+        r = self.clip.bbox()
+        if r.isEmpty():
+            return
+        self.x = min(max(self.x, r.left()), r.right() + 1)
+        self.y = min(max(self.y, r.top()), r.bottom() + 1)
 
     def transform_state(self) -> Dict:
         return {"x": self.x, "y": self.y, "sx": self.sx, "sy": self.sy,
@@ -268,6 +322,40 @@ class TextLayer(ItemLayer):
 # ------------------------------------------------------------------------------
 
 
+def render_clipped_content(layer: Layer, w: int, h: int):
+    """(image, top-left) of the layer's pixels with its clip applied exactly (soft edges kept)."""
+    clip = layer.clip
+    r = clip.bbox().intersected(QRect(0, 0, w, h)) if clip is not None else QRect(0, 0, w, h)
+    if r.isEmpty():
+        return None, r.topLeft()
+    tmp = new_image(r.width(), r.height())
+    tp = QPainter(tmp)
+    tp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    tp.setRenderHint(QPainter.RenderHint.Antialiasing)
+    tp.translate(-r.x(), -r.y())
+    layer.paint_content(tp)
+    if clip is not None:
+        tp.resetTransform()
+        tp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        tp.drawImage(QPointF(0, 0), clip.qimage(), QRectF(r))
+    tp.end()
+    return tmp, r.topLeft()
+
+
+def paint_exact(layer: Layer, painter: QPainter, w: int, h: int) -> None:
+    """Like layer.paint() but applies a clip mask with exact (anti-aliased) edges. Used for exports/caches."""
+    if layer.clip is None:
+        layer.paint(painter)
+        return
+    img, tl = render_clipped_content(layer, w, h)
+    if img is None:
+        return
+    painter.save()
+    layer._apply_common(painter)
+    painter.drawImage(tl, img)
+    painter.restore()
+
+
 def composite(layers: List[Layer], w: int, h: int, background: Optional[QColor] = None) -> QImage:
     img = new_image(w, h)
     if background is not None:
@@ -277,21 +365,25 @@ def composite(layers: List[Layer], w: int, h: int, background: Optional[QColor] 
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     for layer in layers:
         if layer.visible:
-            layer.paint(p)
+            paint_exact(layer, p, w, h)
     p.end()
     return img
 
 
-def rasterize_item(layer: ItemLayer, w: int, h: int) -> RasterLayer:
+def bake_layer(layer: Layer, w: int, h: int) -> QImage:
+    """The layer's own pixels (clip applied, opacity/blend NOT applied) as a full-size image."""
     img = new_image(w, h)
-    p = QPainter(img)
-    op, blend = layer.opacity, layer.blend
-    layer.opacity, layer.blend = 1.0, "Normal"
-    layer.paint(p)
-    layer.opacity, layer.blend = op, blend
-    p.end()
-    r = RasterLayer(layer.name, img)
-    r.opacity, r.blend, r.visible = op, blend, layer.visible
+    content, tl = render_clipped_content(layer, w, h)
+    if content is not None:
+        p = QPainter(img)
+        p.drawImage(tl, content)
+        p.end()
+    return img
+
+
+def rasterize_item(layer: Layer, w: int, h: int) -> RasterLayer:
+    r = RasterLayer(layer.name, bake_layer(layer, w, h))
+    r.opacity, r.blend, r.visible = layer.opacity, layer.blend, layer.visible
     return r
 
 
@@ -337,6 +429,11 @@ def save_project(path, data: ProjectData) -> None:
                 fname = f"layer_{i:02d}.png"
                 zf.writestr(fname, _qimage_png_bytes(layer.image))
                 entry["file"] = fname
+            if layer.clip is not None:
+                cname = f"clip_{i:02d}.png"
+                zf.writestr(cname, mask_to_png_bytes(layer.clip.mask))
+                entry["clip"] = cname
+                entry["clip_label"] = layer.clip.label
             manifest["layers"].append(entry)
         if data.guide_png:
             zf.writestr("guide.png", data.guide_png)
@@ -359,6 +456,10 @@ def load_project(path) -> ProjectData:
             else:
                 continue
             layer.set_props(props)
+            if entry.get("clip"):
+                m = mask_from_png_bytes(zf.read(entry["clip"]))
+                if m is not None and m.shape == (manifest["height"], manifest["width"]):
+                    layer.clip = LayerClip(m, entry.get("clip_label", ""))
             layers.append(layer)
         guide = zf.read(manifest["guide"]) if manifest.get("guide") else None
     return ProjectData(manifest["width"], manifest["height"], layers, guide, manifest.get("meta"))
@@ -374,4 +475,23 @@ def clone_layer(layer: Layer) -> Layer:
     else:
         raise TypeError(layer)
     c.set_props(layer.props())
+    c.clip = layer.clip.copy() if layer.clip is not None else None
+    return c
+
+
+def snapshot_layer(layer: Layer) -> Layer:
+    """
+    Cheap independent copy: QImages are implicitly shared (copy-on-write), so a snapshot costs almost nothing
+    until one side paints. Used to store a version's layers while the editor keeps working on its own copy.
+    """
+    if isinstance(layer, RasterLayer):
+        c: Layer = RasterLayer(layer.name, QImage(layer.image))
+    elif isinstance(layer, ImageLayer):
+        c = ImageLayer(layer.name, QImage(layer.image))
+    elif isinstance(layer, TextLayer):
+        c = TextLayer(layer.name, layer.text)
+    else:
+        raise TypeError(layer)
+    c.set_props(layer.props())
+    c.clip = layer.clip  # clip masks are never modified in place, so sharing is safe
     return c

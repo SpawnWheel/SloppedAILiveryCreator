@@ -31,7 +31,7 @@ class ReferencePanel(QGroupBox):
     openPromptEditorRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__("2. REFERENCE BOARD & PROMPT", parent)
+        super().__init__("REFERENCE BOARD && PROMPT", parent)
         self.thumbnails: List[ImageThumbnail] = []
         self._custom_user_prompt: Optional[str] = None
         self._custom_system_instruction: Optional[str] = None

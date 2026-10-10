@@ -52,7 +52,10 @@ class TestPromptPack(unittest.TestCase):
         self.assertIn("GENERATE AN IMAGE", t)
         self.assertIn("Gulf blue", t)
         self.assertIn("GEOMETRY LOCK", t)
-        self.assertIn("FLAT UNLIT COLOUR", t)
+        self.assertIn("NO BAKED LIGHTING", t)
+        self.assertIn("ARTWORK ORIENTATION (", t)
+        self.assertIn("OPEN HOLES / CUT-OUTS", t)
+        self.assertIn("LEFT/RIGHT SYMMETRY (", t)
         self.assertIn("expert automotive texture artist", t)   # system rules merged in
         self.assertIn("Image 1 = 01_template.png", t)
         self.assertEqual(t, (pack.folder / "prompt.txt").read_text(encoding="utf-8"))

@@ -33,7 +33,7 @@ class DeploymentPanel(QGroupBox):
     profileChanged = Signal(object)  # CarProfile
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__("4. AMS2 TARGET & DEPLOYMENT", parent)
+        super().__init__("AMS2 TARGET CAR && LIVERY SLOT", parent)
         self.profile = None
         self._build_ui()
         self._populate_car_folders()

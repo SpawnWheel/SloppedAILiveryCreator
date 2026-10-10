@@ -15,7 +15,7 @@ APP_ORGANIZATION = "SimModding"
 # strongly the BASE LIVERY's paint shader (clear-coat gloss, metallic flake, chrome...) shows through.
 #   255 = full effect of the base paint (glossy on a normal base)
 #    80 = mostly flat / matte
-# The *type* of paint (metallic, chrome, matte shader) comes from the Base Livery chosen in section 4;
+# The *type* of paint (metallic, chrome, matte shader) comes from the Base Livery chosen in the Install & Export tab;
 # this setting only controls how much of it you get. That's why "Metallic" / "Chrome" are not options here -
 # pick a Metallic / Chrome base livery instead (if the car has one).
 FINISH_ALPHA_MAP = {

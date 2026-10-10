@@ -359,7 +359,7 @@ class TestGlossAndFlatPrompt(unittest.TestCase):
         from src.utils.constants import DEFAULT_FINISH
         self.assertEqual(DEFAULT_FINISH, "Gloss")
 
-    def test_prompts_ask_for_flat_unlit_colour_and_omit_finish(self):
+    def test_prompts_ban_baked_lighting_keep_rich_artwork_and_omit_finish(self):
         from src.core.ai_engine import AIEngine, FLAT_COLOUR_RULES
 
         prompt = AIEngine.build_default_user_prompt(
@@ -367,8 +367,80 @@ class TestGlossAndFlatPrompt(unittest.TestCase):
         )
         self.assertNotIn("Paint Finish", prompt)
         self.assertNotIn("Matte", prompt)
-        self.assertIn("unlit", prompt.lower())
-        self.assertIn("FLAT UNLIT COLOUR", AIEngine.build_default_system_instruction())
-        self.assertIn("FLAT UNLIT COLOUR", AIEngine.build_refinement_system_instruction())
-        self.assertIn("no reflections", FLAT_COLOUR_RULES.lower())
-        self.assertIn("exception", FLAT_COLOUR_RULES.lower())
+        self.assertIn("no scene lighting", prompt.lower())
+        self.assertIn("NO BAKED LIGHTING", AIEngine.build_default_system_instruction())
+        self.assertIn("NO BAKED LIGHTING", AIEngine.build_refinement_system_instruction())
+        low = FLAT_COLOUR_RULES.lower()
+        self.assertIn("environment reflections", low)
+        self.assertIn("do not simplify", low)          # artwork keeps its depth
+        self.assertNotIn("vector-crisp", AIEngine.build_default_system_instruction().lower())
+
+class TestHolesAndSymmetryPrompt(unittest.TestCase):
+    """Openings inside panels stay unpainted; left/right design is mirrored unless the user asks otherwise."""
+
+    def test_rules_in_all_prompts(self):
+        from src.core.ai_engine import AIEngine, OPEN_HOLES_RULES, SYMMETRY_RULES
+
+        for instr in (AIEngine.build_default_system_instruction(), AIEngine.build_refinement_system_instruction()):
+            self.assertIn("OPEN HOLES", instr)
+            self.assertIn("LEFT/RIGHT SYMMETRY", instr)
+        user = AIEngine.build_default_user_prompt(user_guidance="#35 on both doors").lower()
+        self.assertIn("cut-out", user)
+        self.assertIn("asymmetric", user)
+        self.assertIn("unpainted", OPEN_HOLES_RULES.lower())
+        low = SYMMETRY_RULES.lower()
+        self.assertIn("unless the design instructions explicitly ask", low)
+        self.assertIn("never the lettering", low)
+
+    def test_appended_once_to_custom_prompts(self):
+        from unittest import mock
+        from PIL import Image
+        from src.core.ai_engine import AIEngine
+
+        engine = AIEngine(api_key="dummy_key_123")
+        captured = {}
+
+        def fake_run(contents, *a, **kw):
+            captured["prompt"] = contents[-1]
+            return Image.new("RGBA", (64, 64))
+
+        with mock.patch.object(engine, "_run_image_request", side_effect=fake_run), \
+                mock.patch.object(engine, "fix_rotated_panels", side_effect=lambda r, *a, **k: r):
+            engine.generate_livery(Image.new("RGB", (64, 64), "white"), [], prompt="red car")
+        self.assertEqual(captured["prompt"].count("OPEN HOLES / CUT-OUTS"), 1)
+        self.assertEqual(captured["prompt"].count("LEFT/RIGHT SYMMETRY ("), 1)
+        self.assertEqual(AIEngine._design_brief(captured["prompt"]), "red car")
+
+
+class TestOrientationPrompt(unittest.TestCase):
+    """Artwork must be oriented per UV island (upright on the car), not upright on the sheet."""
+
+    def test_orientation_rules_in_all_prompts(self):
+        from src.core.ai_engine import AIEngine, ORIENTATION_RULES
+
+        self.assertIn("ARTWORK ORIENTATION", AIEngine.build_default_system_instruction())
+        self.assertIn("ARTWORK ORIENTATION", AIEngine.build_refinement_system_instruction())
+        user = AIEngine.build_default_user_prompt(user_guidance="#35 on both doors")
+        self.assertIn("upright on the car", user.lower())
+        low = ORIENTATION_RULES.lower()
+        for phrase in ("wheel-arch", "never be mirrored", "upside-down", "orientation map", "step 3"):
+            self.assertIn(phrase, low)
+
+    def test_orientation_appended_to_custom_prompts(self):
+        from unittest import mock
+        from PIL import Image
+        from src.core.ai_engine import AIEngine
+
+        engine = AIEngine(api_key="dummy_key_123")
+        captured = {}
+
+        def fake_run(contents, *a, **kw):
+            captured["prompt"] = contents[-1]
+            return Image.new("RGBA", (64, 64))
+
+        tpl = Image.new("RGB", (256, 256), "white")
+        with mock.patch.object(engine, "_run_image_request", side_effect=fake_run):
+            engine.generate_livery(tpl, [], "my own custom prompt", target_resolution=64)
+            self.assertEqual(captured["prompt"].count("ARTWORK ORIENTATION ("), 1)
+            engine.refine_livery(Image.new("RGB", (64, 64)), notes="move the number", wireframe=tpl)
+            self.assertIn("ARTWORK ORIENTATION (", captured["prompt"])

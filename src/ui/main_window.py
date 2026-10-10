@@ -10,14 +10,16 @@ from typing import Dict, List, Optional, Tuple
 from PIL import Image
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -36,9 +38,11 @@ from src.core.exporter import LiveryExporter
 from src.core.installer import LiveryInstaller
 from src.ui.actions_panel import ActionsPanel, BackupRestoreDialog
 from src.ui.deployment_panel import DeploymentPanel
-from src.ui.editor.livery_editor import LiveryPaintEditor
+from src.ui.editor.livery_editor import LiveryPaintEditor, PaintEditorWidget
+from src.ui.editor.theme import MAIN_TABS_QSS
 from src.ui.load_livery_dialog import LoadLiveryDialog
-from src.ui.preview_panel import PreviewPanel
+from src.ui.preview_panel import LiveryRevision, PreviewPanel
+from src.ui.qt_image import pil_to_qpixmap
 from src.ui.prompt_dialog import PromptEditorDialog
 from src.ui.prompt_pack_dialog import PromptPackDialog, copy_pack_to_clipboard
 from src.ui.reference_panel import ReferencePanel
@@ -183,6 +187,9 @@ class GenerationWorker(QThread):
                 target_resolution=self.target_resolution,
             )
             img, report = fit_to_template(img, self.wireframe)
+            notes = list(getattr(self.ai_engine, "last_notes", []) or [])
+            if notes:
+                report = "; ".join([report] + notes) if report else "; ".join(notes)
             self.finished.emit(img, report)
         except Exception as e:
             self.error.emit(str(e))
@@ -466,8 +473,7 @@ class MainWindow(QMainWindow):
         action_open_ams2.triggered.connect(self._open_overrides_folder)
         tools_menu.addAction(action_open_ams2)
 
-        action_paint = QAction("&Paint Editor (current version)...", self)
-        action_paint.setShortcut("Ctrl+E")
+        action_paint = QAction("Open Current Version in &Paint Editor", self)
         action_paint.triggered.connect(self._open_paint_editor)
         tools_menu.addAction(action_paint)
         tools_menu.addSeparator()
@@ -486,14 +492,33 @@ class MainWindow(QMainWindow):
         self.action_clip.setChecked(config.get("clip_to_islands", True))
         self.action_clip.toggled.connect(lambda v: config.set("clip_to_islands", v))
         tools_menu.addAction(self.action_clip)
+
+        self.action_orient = QAction("&Fix Rotated Panels (extra AI call per rotated panel)", self, checkable=True)
+        self.action_orient.setToolTip(
+            "For templates whose placeholder numbers show a panel is stored sideways/upside-down (PSD), repaint that "
+            "panel upright in a second pass and rotate it back into place")
+        self.action_orient.setChecked(config.get("orientation_pass", True))
+        self.action_orient.toggled.connect(lambda v: config.set("orientation_pass", v))
+        tools_menu.addAction(self.action_orient)
         tools_menu.addSeparator()
 
         action_clear_cache = QAction("&Clear Template Cache", self)
         action_clear_cache.triggered.connect(self._clear_cache)
         tools_menu.addAction(action_clear_cache)
 
+        # Go Menu: the main tabs
+        go_menu = menu_bar.addMenu("&Go")
+        self._tab_actions = []
+        for i, name in enumerate(["&AI Generation", "&Paint Editor", "&Wheels / Rims", "&Install && Export"]):
+            act = QAction(name, self)
+            act.setShortcut(QKeySequence(f"Alt+{i + 1}"))
+            act.triggered.connect(lambda _=False, idx=i: self.tabs.setCurrentIndex(idx))
+            go_menu.addAction(act)
+            self._tab_actions.append(act)
+
         # Help Menu
         help_menu = menu_bar.addMenu("&Help")
+        self._help_menu = help_menu
         action_wheels = QAction("How do &wheels / rims work?", self)
         action_wheels.triggered.connect(self._show_wheels_help)
         help_menu.addAction(action_wheels)
@@ -506,14 +531,23 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(10, 10, 10, 4)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(0, 0, 0, 4)
+        main_layout.setSpacing(0)
 
-        # Splitter dividing Left Panels and Right Panels
+        # Document-style tabs across the top, like Photoshop / GIMP
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("MainTabs")
+        self.tabs.setDocumentMode(True)
+        self.tabs.setStyleSheet(MAIN_TABS_QSS)
+        main_layout.addWidget(self.tabs, 1)
+
+        # ---------------------------------------------------------------- tab 1: AI Generation
+        ai_tab = QWidget()
+        ai_layout = QHBoxLayout(ai_tab)
+        ai_layout.setContentsMargins(10, 10, 10, 6)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
 
-        # LEFT COLUMN: Section 1 (Wireframe), Section 2 (References & Prompt), Section 4 (AMS2 Deployment)
         left_container = QWidget()
         left_layout = QVBoxLayout(left_container)
         left_layout.setContentsMargins(0, 0, 4, 0)
@@ -526,17 +560,7 @@ class MainWindow(QMainWindow):
         self.reference_panel = ReferencePanel(self)
         self.reference_panel.openPromptEditorRequested.connect(self._open_prompt_editor)
         left_layout.addWidget(self.reference_panel, 1)
-
-        self.deployment_panel = DeploymentPanel(self)
-        left_layout.addWidget(self.deployment_panel)
-
         splitter.addWidget(left_container)
-
-        # RIGHT COLUMN: Section 3 (Preview & Generation), Section 5 (Actions)
-        right_container = QWidget()
-        right_layout = QVBoxLayout(right_container)
-        right_layout.setContentsMargins(4, 0, 0, 0)
-        right_layout.setSpacing(8)
 
         self.preview_panel = PreviewPanel(self)
         self.preview_panel.generateRequested.connect(self._on_generate_livery)
@@ -545,16 +569,24 @@ class MainWindow(QMainWindow):
         self.preview_panel.commitRequested.connect(self._on_commit_livery)
         self.preview_panel.loadLiveryRequested.connect(self._open_load_livery_dialog)
         self.preview_panel.paintEditorRequested.connect(self._open_paint_editor)
+        self.preview_panel.revisionChanged.connect(self._on_revision_changed)
+        splitter.addWidget(self.preview_panel)
+        splitter.setSizes([480, 720])
+        ai_layout.addWidget(splitter)
+        self.tabs.addTab(ai_tab, "✦  AI Generation")
 
-        # Keep the Gloss control's "on '<base>' base paint" hint in sync with section 4's Base Livery
-        self.deployment_panel.configChanged.connect(
-            lambda: self.preview_panel.set_base_livery_hint(self.deployment_panel.get_base_livery())
-        )
-        self.deployment_panel.profileChanged.connect(
-            lambda _p: self.preview_panel.set_base_livery_hint(self.deployment_panel.get_base_livery())
-        )
-        self.preview_panel.set_base_livery_hint(self.deployment_panel.get_base_livery())
+        # ---------------------------------------------------------------- tab 2: Paint Editor
+        self.paint_editor = PaintEditorWidget(self, embedded=True)
+        self.paint_editor.applied.connect(self._on_editor_applied)
+        self.paint_editor.openLiveryRequested.connect(self._open_load_livery_dialog)
+        self.paint_editor.useCurrentVersionRequested.connect(lambda: self._sync_editor(force=True))
+        self.paint_editor.guide_provider = lambda: self.wireframe_panel.get_wireframe()
+        self.tabs.addTab(self.paint_editor, "🖌  Paint Editor")
+        self._editor_menu_actions = [self.menuBar().insertMenu(self._help_menu.menuAction(), m)
+                                     for m in self.paint_editor.menus()]
+        self._applying_edit = False
 
+        # ---------------------------------------------------------------- tab 3: Wheels
         self.wheels_panel = WheelsPanel(
             ai_engine=self.ai_engine,
             body_provider=self.preview_panel.get_generated_image,
@@ -563,32 +595,67 @@ class MainWindow(QMainWindow):
         self.wheels_panel.statusMessage.connect(self.status_bar_message)
         self.wheels_panel.busyChanged.connect(self._on_wheels_busy)
         self.wheels_panel.paintEditorRequested.connect(self._open_wheel_editor)
+        wheels_tab = QWidget()
+        wl = QVBoxLayout(wheels_tab)
+        wl.setContentsMargins(10, 10, 10, 6)
+        wl.addWidget(self.wheels_panel)
+        self.tabs.addTab(wheels_tab, "🛞  Wheels / Rims")
 
-        self.right_tabs = QTabWidget()
-        self.right_tabs.setStyleSheet(
-            """
-            QTabWidget::pane { border: none; }
-            QTabBar::tab { background-color: #232730; color: #b0b8c6; padding: 6px 18px;
-                           border-top-left-radius: 5px; border-top-right-radius: 5px; margin-right: 2px;
-                           font-weight: bold; font-size: 11px; }
-            QTabBar::tab:selected { background-color: #0078d4; color: #ffffff; }
-            """
-        )
-        self.right_tabs.addTab(self.preview_panel, "🏎  Body Livery")
-        self.right_tabs.addTab(self.wheels_panel, "🛞  Wheels / Rims")
-        self.right_tabs.currentChanged.connect(lambda i: i == 1 and self.wheels_panel.refresh_palette())
-        right_layout.addWidget(self.right_tabs, 1)
-
+        # ---------------------------------------------------------------- tab 4: Install & Export
+        install_tab = QWidget()
+        il = QHBoxLayout(install_tab)
+        il.setContentsMargins(10, 10, 10, 6)
+        il.setSpacing(10)
+        left = QVBoxLayout()
+        self.deployment_panel = DeploymentPanel(self)
+        left.addWidget(self.deployment_panel)
+        left.addStretch()
+        il.addLayout(left, 1)
+        right = QVBoxLayout()
+        right.addWidget(self._build_install_summary())
         self.actions_panel = ActionsPanel(self)
         self.actions_panel.installRequested.connect(self._on_install_livery)
         self.actions_panel.quickInstallRequested.connect(self._on_quick_install)
         self.actions_panel.exportRequested.connect(self._on_export_zip)
         self.actions_panel.restoreRequested.connect(self._on_restore_backup)
-        right_layout.addWidget(self.actions_panel)
+        right.addWidget(self.actions_panel)
+        right.addStretch()
+        il.addLayout(right, 1)
+        self.tabs.addTab(install_tab, "📦  Install && Export")
 
-        splitter.addWidget(right_container)
-        splitter.setSizes([520, 680])
-        main_layout.addWidget(splitter, 1)
+        # Keep the Gloss control's "on '<base>' base paint" hint in sync with the Base Livery
+        self.deployment_panel.configChanged.connect(
+            lambda: self.preview_panel.set_base_livery_hint(self.deployment_panel.get_base_livery())
+        )
+        self.deployment_panel.configChanged.connect(self._refresh_install_summary)
+        self.deployment_panel.profileChanged.connect(
+            lambda _p: self.preview_panel.set_base_livery_hint(self.deployment_panel.get_base_livery())
+        )
+        self.preview_panel.set_base_livery_hint(self.deployment_panel.get_base_livery())
+
+        # Corner of the tab bar: current version + one-click install, visible from every tab
+        corner = QWidget()
+        cl = QHBoxLayout(corner)
+        cl.setContentsMargins(0, 2, 8, 2)
+        cl.setSpacing(8)
+        self.lbl_corner_version = QLabel("No livery yet")
+        self.lbl_corner_version.setStyleSheet("color: #8c9099; font-size: 11px;")
+        cl.addWidget(self.lbl_corner_version)
+        self.btn_corner_install = QPushButton("💾 Install to AMS2")
+        self.btn_corner_install.setToolTip("Install the current version (car, slot and team are set in the "
+                                           "Install & Export tab)")
+        self.btn_corner_install.setStyleSheet(
+            "QPushButton { background-color: #2e7d32; color: white; font-weight: bold; border: none;"
+            " border-radius: 3px; padding: 4px 12px; font-size: 11px; }"
+            "QPushButton:hover { background-color: #388e3c; }"
+            "QPushButton:disabled { background-color: #2a2c30; color: #5d6168; }")
+        self.btn_corner_install.clicked.connect(self._on_install_livery)
+        self.btn_corner_install.setEnabled(False)
+        cl.addWidget(self.btn_corner_install)
+        self.tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self._on_tab_changed(0)
 
         # Bottom Custom Status Bar
         self.status_bar = CustomStatusBar(self)
@@ -596,6 +663,149 @@ class MainWindow(QMainWindow):
 
         self.deployment_panel.profileChanged.connect(self.wheels_panel.set_profile)
         self.wheels_panel.set_profile(self.deployment_panel.profile)
+
+    def _build_install_summary(self) -> QGroupBox:
+        box = QGroupBox("VERSION TO INSTALL")
+        v = QHBoxLayout(box)
+        v.setContentsMargins(12, 14, 12, 12)
+        v.setSpacing(12)
+        self.lbl_install_thumb = QLabel()
+        self.lbl_install_thumb.setFixedSize(180, 180)
+        self.lbl_install_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_install_thumb.setStyleSheet("background: #14161a; border: 1px solid #2e323b; border-radius: 4px;"
+                                             " color: #555c68;")
+        v.addWidget(self.lbl_install_thumb)
+        self.lbl_install_info = QLabel()
+        self.lbl_install_info.setWordWrap(True)
+        self.lbl_install_info.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.lbl_install_info.setStyleSheet("color: #b8beca; font-size: 11px;")
+        v.addWidget(self.lbl_install_info, 1)
+        return box
+
+    def _refresh_install_summary(self) -> None:
+        if not hasattr(self, "lbl_install_thumb"):
+            return
+        rev = self.preview_panel.current_revision()
+        if rev is None:
+            self.lbl_install_thumb.setPixmap(QPixmap())
+            self.lbl_install_thumb.setText("No livery")
+            self.lbl_install_info.setText("Generate a livery (AI Generation tab), paint one (Paint Editor tab) or "
+                                          "load an existing one first.")
+            return
+        thumb = rev.image.copy()
+        thumb.thumbnail((178, 178))
+        self.lbl_install_thumb.setPixmap(pil_to_qpixmap(thumb))
+        dp = self.deployment_panel
+        state = "✅ committed" if rev.committed else "draft (not committed yet)"
+        edits = ""
+        if getattr(self, "paint_editor", None) is not None and self.paint_editor.is_dirty():
+            edits = "<br><span style='color:#ffb74d'>⚠ The Paint Editor has edits that aren't applied yet - " \
+                    "you'll be asked to apply them before installing.</span>"
+        wheels = " + custom rims" if self.wheels_panel.get_extra_textures() else ""
+        self.lbl_install_info.setText(
+            f"<b style='color:white; font-size:13px'>{rev.label}</b> &nbsp; <span>{state}</span><br><br>"
+            f"Car: <b>{dp.get_car_folder() or '—'}</b><br>"
+            f"Slot: <b>#{dp.get_livery_id()}</b> &nbsp; Team: <b>{dp.get_team_name() or '—'}</b><br>"
+            f"Base livery: <b>{dp.get_base_livery()}</b> &nbsp; Gloss: <b>{self.preview_panel.get_finish()}</b>"
+            f"<br>Texture: {rev.image.size[0]} × {rev.image.size[1]} px{wheels}{edits}"
+        )
+
+    # ==========================================================================
+    # Tabs + Paint Editor sync
+    # ==========================================================================
+
+    def _on_tab_changed(self, index: int) -> None:
+        widget = self.tabs.widget(index)
+        on_paint = widget is self.paint_editor
+        for act in self._editor_menu_actions:
+            act.setVisible(on_paint)
+        if on_paint:
+            self._sync_editor()
+        elif index == 2:
+            self.wheels_panel.refresh_palette()
+        if index == 3:
+            self._refresh_install_summary()
+
+    def _on_revision_changed(self) -> None:
+        rev = self.preview_panel.current_revision()
+        self.lbl_corner_version.setText(f"Current: {rev.label}" if rev else "No livery yet")
+        self.btn_corner_install.setEnabled(rev is not None)
+        self.paint_editor.set_current_version_available(rev.label if rev else None)
+        self._refresh_install_summary()
+        if not self._applying_edit and self.tabs.currentWidget() is self.paint_editor:
+            self._sync_editor()
+
+    def _sync_editor(self, force: bool = False) -> None:
+        """Opens the current version in the Paint tab unless it's already there (asks before dropping edits)."""
+        pe = self.paint_editor
+        rev = self.preview_panel.current_revision()
+        pe.set_current_version_available(rev.label if rev else None)
+        if rev is None:
+            return
+        if pe.source_key is rev and pe.has_content():
+            return
+        if pe.has_content() and not force and pe.source_key in ("blank", "project") and pe.is_dirty():
+            return  # the user is painting something of their own - don't replace it
+        if pe.is_dirty():
+            current = pe.source_key.label if isinstance(pe.source_key, LiveryRevision) else "your canvas"
+            res = QMessageBox.question(
+                self, "Unapplied paint edits",
+                f"The Paint Editor still has unapplied edits on {current}.\n\n"
+                f"Open {rev.label} instead and discard those edits?",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if res != QMessageBox.StandardButton.Discard:
+                return
+        guide = self.wireframe_panel.get_wireframe()
+        pe.load(rev.image, guide_image=guide, project=rev.project, source_key=rev)
+        if guide is None and rev.project is None:
+            pe._flash("No template loaded - load the car's template in the AI Generation tab (or the Template "
+                      "dock) to see and select its panels.")
+        else:
+            pe._flash(f"Editing {rev.label}. Press W and click panels to paint inside them.")
+
+    def _on_editor_applied(self, img: Image.Image) -> None:
+        pe = self.paint_editor
+        pp = self.preview_panel
+        src = pe.source_key
+        if isinstance(src, LiveryRevision) and img.size != src.image.size:
+            img = img.resize(src.image.size, Image.Resampling.LANCZOS)
+        n = len(pp.revisions) + 1
+        label = f"v{n} (Hand-painted)"
+        self._applying_edit = True
+        try:
+            if pp.revisions:
+                pp.add_revision(img, notes="Hand-painted in Paint Editor", label=label, project=pe.project_data())
+            else:
+                pp.reset_revisions(img, label=label)
+                pp.revisions[0].project = pe.project_data()
+        finally:
+            self._applying_edit = False
+        pe.mark_clean(source_key=pp.current_revision())
+        self.wheels_panel.refresh_palette()
+        self._refresh_install_summary()
+        pe._flash(f"Applied as {label} - it's now the current version. Keep painting, or install it from the "
+                  "Install & Export tab.")
+        self.status_bar.show_info(f"Hand-painted version {label} added.")
+
+    def _confirm_editor_applied(self) -> bool:
+        """Before install / export: offer to apply unapplied Paint Editor edits first."""
+        pe = self.paint_editor
+        if not pe.is_dirty():
+            return True
+        res = QMessageBox.question(
+            self, "Unapplied paint edits",
+            "The Paint Editor has edits that haven't been applied to a version yet.\n\n"
+            "Apply them as a new version first? (No = use the current version without them)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+        if res == QMessageBox.StandardButton.Cancel:
+            return False
+        if res == QMessageBox.StandardButton.Yes:
+            pe._apply()
+        return True
 
     def status_bar_message(self, msg: str):
         self.status_bar.show_info(msg)
@@ -639,7 +849,7 @@ class MainWindow(QMainWindow):
     def _show_wheels_help(self):
         from src.ui.wheels_panel import HOW_IT_WORKS
 
-        self.right_tabs.setCurrentWidget(self.wheels_panel)
+        self.tabs.setCurrentIndex(2)
         QMessageBox.information(self, "Wheels & rims in AMS2", HOW_IT_WORKS)
 
     def _show_about(self):
@@ -658,8 +868,9 @@ class MainWindow(QMainWindow):
     # ==========================================================================
 
     def _on_wireframe_loaded(self, img: Image.Image, name: str):
-        """Passes loaded wireframe into the preview viewport for optional overlay."""
+        """Passes loaded wireframe into the preview viewport (overlay) and the Paint Editor (panel guide)."""
         self.preview_panel.set_wireframe(img)
+        self.paint_editor.set_guide_image(img)
 
     def _assemble_current_prompts(self) -> Tuple[str, str]:
         """Synthesizes structured user prompt and system instruction strictly from references and style text."""
@@ -928,7 +1139,7 @@ class MainWindow(QMainWindow):
         rev = self.preview_panel.current_revision()
         wf = self.wireframe_panel.get_wireframe()
         if rev is None or wf is None:
-            QMessageBox.information(self, "Re-align", "Load a template in section 1 and have a livery version open first.")
+            QMessageBox.information(self, "Re-align", "Load a template in the AI Generation tab and have a livery version open first.")
             return
         from src.core.template_fit import lock_to_template
 
@@ -1023,33 +1234,8 @@ class MainWindow(QMainWindow):
     # ==========================================================================
 
     def _open_paint_editor(self):
-        rev = self.preview_panel.current_revision()
-        if rev is None:
-            QMessageBox.information(self, "Paint Editor", "Generate or load a livery first.")
-            return
-        guide = self.wireframe_panel.get_wireframe()
-        editor = LiveryPaintEditor(
-            base_image=rev.image,
-            guide_image=guide,
-            title=f"Livery Paint Editor — {rev.label}",
-            project=rev.project,
-            parent=self,
-        )
-        if guide is None and rev.project is None:
-            editor._flash("No template loaded in section 1 - use 'Load / change template image…' on the right "
-                          "to see panel outlines while you paint.")
-        editor.showMaximized()
-        if editor.exec() == QDialog.DialogCode.Accepted and editor.result_image() is not None:
-            img = editor.result_image()
-            if img.size != rev.image.size:
-                img = img.resize(rev.image.size, Image.Resampling.LANCZOS)
-            n = len(self.preview_panel.revisions) + 1
-            self.preview_panel.add_revision(
-                img, notes="Hand-painted in Paint Editor", label=f"v{n} (Hand-painted)",
-                project=editor.project_data(),
-            )
-            self.wheels_panel.refresh_palette()
-            self.status_bar.show_info(f"Hand-painted version v{n} added. Use ◀ Prev to compare with the previous one.")
+        """The Paint Editor lives in its own tab now; switching to it opens the current version."""
+        self.tabs.setCurrentWidget(self.paint_editor)
 
     def _open_wheel_editor(self, slot: str):
         img = self.wheels_panel.get_slot_image(slot)
@@ -1078,6 +1264,8 @@ class MainWindow(QMainWindow):
     # ==========================================================================
 
     def _on_install_livery(self):
+        if not self._confirm_editor_applied():
+            return
         texture = self.preview_panel.get_generated_image()
         if texture is None:
             QMessageBox.warning(
@@ -1093,7 +1281,9 @@ class MainWindow(QMainWindow):
         custom_preview = self.preview_panel.get_custom_preview_image()
 
         if not car_folder:
-            QMessageBox.warning(self, "Invalid Car Folder", "Please select or enter a target car folder.")
+            QMessageBox.warning(self, "Invalid Car Folder",
+                                "Please select or enter a target car folder in the Install & Export tab.")
+            self.tabs.setCurrentIndex(3)
             return
 
         wheels = self.wheels_panel.get_extra_textures()
@@ -1222,6 +1412,8 @@ class MainWindow(QMainWindow):
 
 
     def _on_export_zip(self):
+        if not self._confirm_editor_applied():
+            return
         texture = self.preview_panel.get_generated_image()
         if texture is None:
             QMessageBox.warning(
@@ -1302,6 +1494,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Restore Failed", f"Failed to restore backup:\n{e}")
 
     def closeEvent(self, event):
+        if self.paint_editor.is_dirty():
+            res = QMessageBox.question(
+                self, "Unapplied paint edits",
+                "The Paint Editor has edits that haven't been applied to a version. Quit and discard them?",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if res != QMessageBox.StandardButton.Discard:
+                event.ignore()
+                return
+        self.paint_editor.save_workspace()
         workers = [self._gen_worker, self._refine_worker, self._install_worker,
                    self._quick_install_worker, self._export_worker, getattr(self.wheels_panel, "_worker", None)]
         running = [w for w in workers if w is not None and w.isRunning()]
